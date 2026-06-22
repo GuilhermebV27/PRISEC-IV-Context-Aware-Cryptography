@@ -1,18 +1,47 @@
 import numpy as np
-from numba import njit, uint16, uint32, uint8
+from numba import njit, uint16, uint32
 from utils import pkcs7_pad, pkcs7_unpad
 
 BLOCK_SIZE = 8
-KEY_SIZE   = 16
-ROUNDS     = 25
+KEY_SIZE = 16
+ROUNDS = 25
 
-SBOX     = np.array([0x6,0x5,0xC,0xA,0x1,0xE,0x7,0x9,
-                     0xB,0x0,0x3,0xD,0x8,0xF,0x4,0x2], dtype=np.uint16)
+SBOX = np.array(
+    [0x6, 0x5, 0xC, 0xA, 0x1, 0xE, 0x7, 0x9, 0xB, 0x0, 0x3, 0xD, 0x8, 0xF, 0x4, 0x2],
+    dtype=np.uint16,
+)
 SBOX_INV = np.array([SBOX.tolist().index(i) for i in range(16)], dtype=np.uint16)
 
-RC = np.array([0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36,
-               0x6C,0xD8,0xAB,0x4D,0x9A,0x2F,0x5E,0xBC,0x63,0xC6,
-               0x97,0x35,0x6A,0xD4,0xB3], dtype=np.uint32)
+RC = np.array(
+    [
+        0x01,
+        0x02,
+        0x04,
+        0x08,
+        0x10,
+        0x20,
+        0x40,
+        0x80,
+        0x1B,
+        0x36,
+        0x6C,
+        0xD8,
+        0xAB,
+        0x4D,
+        0x9A,
+        0x2F,
+        0x5E,
+        0xBC,
+        0x63,
+        0xC6,
+        0x97,
+        0x35,
+        0x6A,
+        0xD4,
+        0xB3,
+    ],
+    dtype=np.uint32,
+)
 
 SHIFT_AMOUNTS = np.array([0, 1, 12, 13], dtype=np.uint16)
 
@@ -33,7 +62,9 @@ def _sub_nibbles_32_low8(row, sbox):
     out = row & uint32(0xFFFFFFFF)
     for i in range(8):
         nibble = (row >> uint32(4 * i)) & uint32(0xF)
-        out = (out & ~(uint32(0xF) << uint32(4 * i))) | (uint32(sbox[nibble]) << uint32(4 * i))
+        out = (out & ~(uint32(0xF) << uint32(4 * i))) | (
+            uint32(sbox[nibble]) << uint32(4 * i)
+        )
     return out
 
 
@@ -101,7 +132,7 @@ def _encrypt_bulk(k0, k1, k2, k3, blocks):
             s2 = _sub_nibbles_16(s2, SBOX)
             s3 = _sub_nibbles_16(s3, SBOX)
 
-            s1 = uint16((s1 << uint16(1))  | (s1 >> uint16(15)))
+            s1 = uint16((s1 << uint16(1)) | (s1 >> uint16(15)))
             s2 = uint16((s2 << uint16(12)) | (s2 >> uint16(4)))
             s3 = uint16((s3 << uint16(13)) | (s3 >> uint16(3)))
 
@@ -135,7 +166,7 @@ def _decrypt_bulk(k0, k1, k2, k3, blocks):
         s3 ^= rks[ROUNDS, 3]
 
         for r in range(ROUNDS - 1, -1, -1):
-            s1 = uint16((s1 >> uint16(1))  | (s1 << uint16(15)))
+            s1 = uint16((s1 >> uint16(1)) | (s1 << uint16(15)))
             s2 = uint16((s2 >> uint16(12)) | (s2 << uint16(4)))
             s3 = uint16((s3 >> uint16(13)) | (s3 << uint16(3)))
 
@@ -158,17 +189,17 @@ def _decrypt_bulk(k0, k1, k2, k3, blocks):
 
 
 def _key_words(key: bytes):
-    k0 = int.from_bytes(key[0:4],  'little')
-    k1 = int.from_bytes(key[4:8],  'little')
-    k2 = int.from_bytes(key[8:12], 'little')
-    k3 = int.from_bytes(key[12:16],'little')
+    k0 = int.from_bytes(key[0:4], "little")
+    k1 = int.from_bytes(key[4:8], "little")
+    k2 = int.from_bytes(key[8:12], "little")
+    k3 = int.from_bytes(key[12:16], "little")
     return np.uint32(k0), np.uint32(k1), np.uint32(k2), np.uint32(k3)
 
 
 def encrypt(key: bytes, data: bytes) -> bytes:
     k0, k1, k2, k3 = _key_words(key)
     data = pkcs7_pad(data, BLOCK_SIZE)
-    arr  = np.frombuffer(data, dtype=np.uint16).reshape(-1, 4).copy()
+    arr = np.frombuffer(data, dtype=np.uint16).reshape(-1, 4).copy()
     return _encrypt_bulk(k0, k1, k2, k3, arr).tobytes()
 
 
