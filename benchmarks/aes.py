@@ -1,7 +1,7 @@
 from Crypto.Cipher import AES
 import os
 
-NONCE_SIZE = 13
+NONCE_SIZE = 8
 TAG_SIZE = 16  
 
 def encrypt(key: bytes, data: bytes) -> bytes:

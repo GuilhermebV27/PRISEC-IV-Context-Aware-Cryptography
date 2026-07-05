@@ -35,7 +35,6 @@ _DELTA_NP = np.array(_DELTA_PY, dtype=np.uint8)
 
 
 def _key_schedule_np(mk_bytes: bytes):
-    """Returns wk (8,) and sk (128,) as numpy uint8 arrays."""
     K = np.frombuffer(bytes(reversed(mk_bytes)), dtype=np.uint8).copy()
     wk = np.empty(8, dtype=np.uint8)
     wk[0:4] = K[12:16]
@@ -122,7 +121,6 @@ def _enc_core(state, wk, sk):
 
 @njit(cache=True)
 def _dec_core(state, wk, sk):
-    """state: uint8[8] in RFC order (C0…C7), modified in-place → P0…P7."""
     x0 = uint8((uint32(state[0]) - uint32(wk[4])) & 0xFF)
     x1 = state[1]
     x2 = state[2] ^ wk[5]
@@ -176,7 +174,6 @@ def _dec_core(state, wk, sk):
 
 @njit(cache=True, parallel=True)
 def _bulk_encrypt(blocks, wk, sk):
-    """blocks: uint8[N, 8] in RFC byte order — modified in-place."""
     n = blocks.shape[0]
     for b in prange(n):
         _enc_core(blocks[b], wk, sk)
@@ -184,20 +181,17 @@ def _bulk_encrypt(blocks, wk, sk):
 
 @njit(cache=True, parallel=True)
 def _bulk_decrypt(blocks, wk, sk):
-    """blocks: uint8[N, 8] in RFC byte order — modified in-place."""
     n = blocks.shape[0]
     for b in prange(n):
         _dec_core(blocks[b], wk, sk)
 
 
 def _prepare_blocks(data: bytes) -> np.ndarray:
-    """Convert a byte string to uint8[N, 8] in RFC state order (reversed)."""
     arr = np.frombuffer(data, dtype=np.uint8).reshape(-1, 8).copy()
     return arr[:, ::-1]
 
 
 def _finalise_blocks(blocks: np.ndarray) -> bytes:
-    """Convert uint8[N, 8] RFC state order back to a flat byte string."""
     return blocks[:, ::-1].tobytes()
 
 
