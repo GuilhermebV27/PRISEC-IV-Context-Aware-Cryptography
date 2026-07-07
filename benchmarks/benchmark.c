@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
+#include <sched.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 
@@ -49,6 +51,15 @@ static inline int get_repeats(size_t size_n) {
     else return 40;
 }
 
+static inline int get_inner_loops(size_t size_n) {
+    if (size_n <= 1 * 1024) return 10000;
+    else if (size_n <= 5 * 1024) return 5000;
+    else if (size_n <= 10 * 1024) return 2000;
+    else if (size_n <= 50 * 1024) return 200;
+    else if (size_n <= 100 * 1024) return 100;
+    else return 1;
+}
+
 static inline double now_s(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -67,7 +78,18 @@ static double median(double *arr, int n) {
     return arr[n/2];
 }
 
-static BenchMetrics run_bench_aead(size_t size_n, int repeats,
+static void pin_to_cpu0_if_possible(void) {
+#ifdef __linux__
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(0, &set);
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+        fprintf(stderr, "warning: sched_setaffinity failed: %s\n", strerror(errno));
+    }
+#endif
+}
+
+static BenchMetrics run_bench_aead(size_t size_n, int repeats, int inner_loops,
                                    const uint8_t *key, int key_len,
                                    int is_stream,
                                    enc_aead_fn enc_fn,
@@ -91,19 +113,26 @@ static BenchMetrics run_bench_aead(size_t size_n, int repeats,
     size_t ct_len = 0, rec_len = 0;
 
     enc_fn(key, key_len, plain, size_n, ct, &ct_len);
+    dec_fn(key, key_len, ct, ct_len, rec, &rec_len);
 
     for (int r = 0; r < repeats; r++) {
         double t0 = now_s();
-        enc_fn(key, key_len, plain, size_n, ct, &ct_len);
+        for (int k = 0; k < inner_loops; k++) {
+            enc_fn(key, key_len, plain, size_n, ct, &ct_len);
+        }
         double t1 = now_s();
-        enc_times[r] = t1 - t0;
+        enc_times[r] = (t1 - t0) / (double)inner_loops;
     }
 
+    enc_fn(key, key_len, plain, size_n, ct, &ct_len);
+
     for (int r = 0; r < repeats; r++) {
         double t0 = now_s();
-        dec_fn(key, key_len, ct, ct_len, rec, &rec_len);
+        for (int k = 0; k < inner_loops; k++) {
+            dec_fn(key, key_len, ct, ct_len, rec, &rec_len);
+        }
         double t1 = now_s();
-        dec_times[r] = t1 - t0;
+        dec_times[r] = (t1 - t0) / (double)inner_loops;
     }
 
     double enc_med = median(enc_times, repeats);
@@ -131,7 +160,7 @@ static BenchMetrics run_bench_aead(size_t size_n, int repeats,
     return m;
 }
 
-static BenchMetrics run_bench_blk_alloc(size_t size_n, int repeats,
+static BenchMetrics run_bench_blk_alloc(size_t size_n, int repeats, int inner_loops,
                                         const uint8_t *key, size_t block_bytes,
                                         uint8_t *(*enc_fn)(const uint8_t*, const uint8_t*, size_t, size_t*),
                                         uint8_t *(*dec_fn)(const uint8_t*, const uint8_t*, size_t, size_t*)) {
@@ -150,12 +179,19 @@ static BenchMetrics run_bench_blk_alloc(size_t size_n, int repeats,
 
     size_t ct_len = 0, pt_len = 0;
 
+    uint8_t *warm_ct = enc_fn(key, plain, size_n, &ct_len);
+    uint8_t *warm_pt = dec_fn(key, warm_ct, ct_len, &pt_len);
+    free(warm_ct);
+    free(warm_pt);
+
     for (int r = 0; r < repeats; r++) {
         double t0 = now_s();
-        uint8_t *c = enc_fn(key, plain, size_n, &ct_len);
+        for (int k = 0; k < inner_loops; k++) {
+            uint8_t *c = enc_fn(key, plain, size_n, &ct_len);
+            free(c);
+        }
         double t1 = now_s();
-        enc_t[r] = t1 - t0;
-        free(c);
+        enc_t[r] = (t1 - t0) / (double)inner_loops;
     }
 
     uint8_t *last_ct = enc_fn(key, plain, size_n, &ct_len);
@@ -166,10 +202,12 @@ static BenchMetrics run_bench_blk_alloc(size_t size_n, int repeats,
 
     for (int r = 0; r < repeats; r++) {
         double t0 = now_s();
-        uint8_t *p = dec_fn(key, last_ct, ct_len, &pt_len);
+        for (int k = 0; k < inner_loops; k++) {
+            uint8_t *p = dec_fn(key, last_ct, ct_len, &pt_len);
+            free(p);
+        }
         double t1 = now_s();
-        dec_t[r] = t1 - t0;
-        free(p);
+        dec_t[r] = (t1 - t0) / (double)inner_loops;
     }
 
     uint8_t *rec = dec_fn(key, last_ct, ct_len, &pt_len);
@@ -193,7 +231,7 @@ static BenchMetrics run_bench_blk_alloc(size_t size_n, int repeats,
     return m;
 }
 
-static BenchMetrics run_bench_hight(size_t size_n, int repeats, const uint8_t *key) {
+static BenchMetrics run_bench_hight(size_t size_n, int repeats, int inner_loops, const uint8_t *key) {
     BenchMetrics m = {0};
 
     uint8_t *plain = (uint8_t *)malloc(size_n);
@@ -209,13 +247,21 @@ static BenchMetrics run_bench_hight(size_t size_n, int repeats, const uint8_t *k
 
     size_t ct_len = 0, pt_len = 0;
 
+    uint8_t *warm_ct = NULL;
+    hight_encrypt(key, plain, size_n, &warm_ct, &ct_len);
+    uint8_t *warm_pt = hight_decrypt(key, warm_ct, ct_len, &pt_len);
+    free(warm_ct);
+    free(warm_pt);
+
     for (int r = 0; r < repeats; r++) {
-        uint8_t *hct = NULL;
         double t0 = now_s();
-        hight_encrypt(key, plain, size_n, &hct, &ct_len);
+        for (int k = 0; k < inner_loops; k++) {
+            uint8_t *hct = NULL;
+            hight_encrypt(key, plain, size_n, &hct, &ct_len);
+            free(hct);
+        }
         double t1 = now_s();
-        enc_t[r] = t1 - t0;
-        free(hct);
+        enc_t[r] = (t1 - t0) / (double)inner_loops;
     }
 
     uint8_t *last_hct = NULL;
@@ -223,10 +269,12 @@ static BenchMetrics run_bench_hight(size_t size_n, int repeats, const uint8_t *k
 
     for (int r = 0; r < repeats; r++) {
         double t0 = now_s();
-        uint8_t *p = hight_decrypt(key, last_hct, ct_len, &pt_len);
+        for (int k = 0; k < inner_loops; k++) {
+            uint8_t *p = hight_decrypt(key, last_hct, ct_len, &pt_len);
+            free(p);
+        }
         double t1 = now_s();
-        dec_t[r] = t1 - t0;
-        free(p);
+        dec_t[r] = (t1 - t0) / (double)inner_loops;
     }
 
     uint8_t *rec = hight_decrypt(key, last_hct, ct_len, &pt_len);
@@ -271,25 +319,27 @@ static void write_result_line(FILE *csv,
 }
 
 static void run_case_child_write_pipe(int fd,
-                                      size_t size_n, int repeats,
+                                      size_t size_n, int repeats, int inner_loops,
                                       const uint8_t *key, int key_len,
                                       int kind) {
+    pin_to_cpu0_if_possible();
+
     BenchMetrics m;
 
     if (kind == 0) {
-        m = run_bench_aead(size_n, repeats, key, key_len, 0,
+        m = run_bench_aead(size_n, repeats, inner_loops, key, key_len, 0,
                            (enc_aead_fn)aes_encrypt, (dec_aead_fn)aes_decrypt);
     } else if (kind == 1) {
-        m = run_bench_aead(size_n, repeats, key, key_len, 1,
+        m = run_bench_aead(size_n, repeats, inner_loops, key, key_len, 1,
                            (enc_aead_fn)chacha20_encrypt, (dec_aead_fn)chacha20_decrypt);
     } else if (kind == 2) {
-        m = run_bench_blk_alloc(size_n, repeats, key, SPECK_BLOCK_SIZE,
+        m = run_bench_blk_alloc(size_n, repeats, inner_loops, key, SPECK_BLOCK_SIZE,
                                 speck_encrypt, speck_decrypt);
     } else if (kind == 3) {
-        m = run_bench_blk_alloc(size_n, repeats, key, RECT_BLOCK_SIZE,
+        m = run_bench_blk_alloc(size_n, repeats, inner_loops, key, RECT_BLOCK_SIZE,
                                 rectangle_encrypt, rectangle_decrypt);
     } else {
-        m = run_bench_hight(size_n, repeats, key);
+        m = run_bench_hight(size_n, repeats, inner_loops, key);
     }
 
     if (write(fd, &m, sizeof(m)) != sizeof(m)) {
@@ -301,7 +351,7 @@ static void run_case_child_write_pipe(int fd,
 
 static void run_case_parent(FILE *csv,
                             const char *algo, const char *size_label,
-                            size_t size_n, int repeats,
+                            size_t size_n, int repeats, int inner_loops,
                             const uint8_t *key, int key_len,
                             int kind) {
     int pipefd[2];
@@ -320,7 +370,7 @@ static void run_case_parent(FILE *csv,
 
     if (pid == 0) {
         close(pipefd[0]);
-        run_case_child_write_pipe(pipefd[1], size_n, repeats, key, key_len, kind);
+        run_case_child_write_pipe(pipefd[1], size_n, repeats, inner_loops, key, key_len, kind);
     }
 
     close(pipefd[1]);
@@ -411,44 +461,51 @@ int main(void) {
 
     for (size_t s = 0; s < N_SIZES; s++) {
         int reps = get_repeats(DATA_SIZES[s].size);
-        printf("AES-128   %s  (repeats=%d)\n", DATA_SIZES[s].label, reps);
-        run_case_parent(csv, "AES-128", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, key16, 16, 0);
+        int inner = get_inner_loops(DATA_SIZES[s].size);
+        printf("AES-128   %s  (repeats=%d, inner=%d)\n", DATA_SIZES[s].label, reps, inner);
+        run_case_parent(csv, "AES-128", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, inner, key16, 16, 0);
     }
 
     for (size_t s = 0; s < N_SIZES; s++) {
         int reps = get_repeats(DATA_SIZES[s].size);
-        printf("AES-192   %s  (repeats=%d)\n", DATA_SIZES[s].label, reps);
-        run_case_parent(csv, "AES-192", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, key24, 24, 0);
+        int inner = get_inner_loops(DATA_SIZES[s].size);
+        printf("AES-192   %s  (repeats=%d, inner=%d)\n", DATA_SIZES[s].label, reps, inner);
+        run_case_parent(csv, "AES-192", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, inner, key24, 24, 0);
     }
 
     for (size_t s = 0; s < N_SIZES; s++) {
         int reps = get_repeats(DATA_SIZES[s].size);
-        printf("AES-256   %s  (repeats=%d)\n", DATA_SIZES[s].label, reps);
-        run_case_parent(csv, "AES-256", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, key32, 32, 0);
+        int inner = get_inner_loops(DATA_SIZES[s].size);
+        printf("AES-256   %s  (repeats=%d, inner=%d)\n", DATA_SIZES[s].label, reps, inner);
+        run_case_parent(csv, "AES-256", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, inner, key32, 32, 0);
     }
 
     for (size_t s = 0; s < N_SIZES; s++) {
         int reps = get_repeats(DATA_SIZES[s].size);
-        printf("ChaCha20  %s  (repeats=%d)\n", DATA_SIZES[s].label, reps);
-        run_case_parent(csv, "ChaCha20", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, key32, 32, 1);
+        int inner = get_inner_loops(DATA_SIZES[s].size);
+        printf("ChaCha20  %s  (repeats=%d, inner=%d)\n", DATA_SIZES[s].label, reps, inner);
+        run_case_parent(csv, "ChaCha20", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, inner, key32, 32, 1);
     }
 
     for (size_t s = 0; s < N_SIZES; s++) {
         int reps = get_repeats(DATA_SIZES[s].size);
-        printf("SPECK     %s  (repeats=%d)\n", DATA_SIZES[s].label, reps);
-        run_case_parent(csv, "SPECK", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, key16, 16, 2);
+        int inner = get_inner_loops(DATA_SIZES[s].size);
+        printf("SPECK     %s  (repeats=%d, inner=%d)\n", DATA_SIZES[s].label, reps, inner);
+        run_case_parent(csv, "SPECK", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, inner, key16, 16, 2);
     }
 
     for (size_t s = 0; s < N_SIZES; s++) {
         int reps = get_repeats(DATA_SIZES[s].size);
-        printf("RECTANGLE %s  (repeats=%d)\n", DATA_SIZES[s].label, reps);
-        run_case_parent(csv, "RECTANGLE", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, key16, 16, 3);
+        int inner = get_inner_loops(DATA_SIZES[s].size);
+        printf("RECTANGLE %s  (repeats=%d, inner=%d)\n", DATA_SIZES[s].label, reps, inner);
+        run_case_parent(csv, "RECTANGLE", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, inner, key16, 16, 3);
     }
 
     for (size_t s = 0; s < N_SIZES; s++) {
         int reps = get_repeats(DATA_SIZES[s].size);
-        printf("HIGHT     %s  (repeats=%d)\n", DATA_SIZES[s].label, reps);
-        run_case_parent(csv, "HIGHT", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, key16, 16, 4);
+        int inner = get_inner_loops(DATA_SIZES[s].size);
+        printf("HIGHT     %s  (repeats=%d, inner=%d)\n", DATA_SIZES[s].label, reps, inner);
+        run_case_parent(csv, "HIGHT", DATA_SIZES[s].label, DATA_SIZES[s].size, reps, inner, key16, 16, 4);
     }
 
     fclose(csv);
