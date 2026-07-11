@@ -1,55 +1,46 @@
 
 /*
- * benchmark3.c - PRISEC-IV Phase 3 Benchmark (cascade / dual-layer encryption)
+ * benchmark4.c - PRISEC-IV Phase 4 Benchmark (ECC handshake + cascade encryption)
  *
- * Cascade pairs (layer1 -> layer2), each with an INDEPENDENT key per layer:
- *   AES-128   -> AES-256
- *   HIGHT     -> AES-128
- *   SPECK     -> AES-128
- *   ChaCha20  -> AES-256
- *   SPECK     -> ChaCha20
- *   ChaCha20  -> SPECK
- *   SPECK     -> RECTANGLE
- *   HIGHT     -> RECTANGLE
+ * Combines Phase 2 (ECC key establishment) with Phase 3 (dual-layer cascade),
+ * but instead of random independent keys per layer, EACH layer's key is
+ * derived from its OWN independent ECDH handshake (get_shared_key() from
+ * ecc.h), simulating a scenario where two separate secure key-agreement
+ * rounds are performed before a cascade encryption - e.g. one handshake to
+ * agree the inner-layer key, one handshake to agree the outer-layer key.
+ * This still satisfies the Maurer/Massey independence requirement (each
+ * layer's key comes from an unrelated key-agreement instance), while
+ * modeling the real cost of ECC-backed key exchange for BOTH layers.
  *
- * Cascade encryption: plaintext -> layer1_encrypt -> ciphertext1
- *                      ciphertext1 -> layer2_encrypt -> ciphertext2 (final)
- * Cascade decryption (reverse order): ciphertext2 -> layer2_decrypt -> ciphertext1
- *                      ciphertext1 -> layer1_decrypt -> plaintext (recovered)
+ * Combos:
+ *   ECC + AES-128    + AES-256
+ *   ECC + ChaCha20   + AES-256
+ *   ECC + SPECK      + AES-128
+ *   ECC + ChaCha20   + SPECK
+ *   ECC + SPECK      + HIGHT
  *
- * Per Maurer/Massey cascade theorem, using independent keys per layer means
- * the cascade is never weaker than its strongest single layer, regardless
- * of layer order. Layer order here follows the pairs exactly as specified
- * (kept as-is even where it produces extra PKCS7 padding overhead, e.g.
- * pairs starting with an 8-byte-block cipher like HIGHT/SPECK/RECTANGLE
- * feeding into a 16-byte-block cipher like AES, since 16 is not always a
- * clean multiple of the intermediate padded length).
+ * Per repeat:
+ *   1) fresh ECDH handshake #1 -> key1 (for layer1)
+ *   2) fresh ECDH handshake #2 -> key2 (for layer2)
+ *      ecc_ms = handshake1_ms + handshake2_ms (TOTAL ECC cost per repeat)
+ *   3) cascade encrypt:  plaintext -> L1.enc(key1) -> ct1 -> L2.enc(key2) -> ct2
+ *      cascade decrypt:  ct2 -> L2.dec(key2) -> ct1' -> L1.dec(key1) -> plaintext'
+ *      enc_ms / dec_ms = TOTAL across both layers (excludes ecc_ms, reported
+ *      in its own column, consistent with Phase 2's separation of concerns)
+ *   4) memory_enc_kb / memory_dec_kb = SUM of both layers' isolated footprint
+ *      (same canary+heap-delta method as Phase 1/2/3)
  *
- * ALL metrics reported are TOTALS across both layers, as requested:
- *   enc_ms      = layer1_enc_ms + layer2_enc_ms
- *   dec_ms      = layer1_dec_ms + layer2_dec_ms  (reverse-order layers)
- *   throughput  = computed from total enc_ms/dec_ms against original
- *                 plaintext size (not intermediate ciphertext size),
- *                 so it reflects the true end-to-end user-facing rate.
- *   latency_us  = total enc_ms / number of *original* plaintext blocks
- *                 (using the block size of whichever layer is block-based;
- *                 if both layers are block ciphers, layer1's block size is
- *                 used since that's what the original plaintext is chunked
- *                 into first; NA if neither layer is a block cipher)
- *   memory_enc_kb / memory_dec_kb = SUM of both layers' isolated
- *                 heap+stack footprint (layer1 measured, then layer2
- *                 measured independently, then added together)
+ * CSV columns:
+ *   cascade,data_size,ecc_ms,enc_ms,dec_ms,
+ *   throughput_enc_mbps,throughput_dec_mbps,latency_us,
+ *   memory_enc_kb,memory_dec_kb
  *
- * Process isolation + tcache fix: identical strategy to benchmark1.c /
- * benchmark2.c. Each (pair, data_size) combo runs in its own fork()'d
- * child. Binary re-execs itself once at startup with
- * glibc.malloc.tcache_count=0 so mallinfo2() can see every allocation
- * during the isolated memory-measurement call.
+ * Process isolation + tcache fix: identical strategy to benchmark1-3.c.
  *
  * Build:
- *   gcc -O2 -fno-stack-protector -o benchmark3 benchmark3.c -lcrypto -lm
+ *   gcc -O2 -fno-stack-protector -o benchmark4 benchmark4.c -lcrypto -lm
  * Run:
- *   ./benchmark3
+ *   ./benchmark4
  */
 
 #define _POSIX_C_SOURCE 199309L
@@ -258,14 +249,11 @@ typedef struct {
 } cascade_t;
 
 static cascade_t CASCADES[] = {
-    { "AES-128->AES-256",   &AES128,     &AES256     },
-    { "HIGHT->AES-128",     &HIGHT_,     &AES128     },
-    { "SPECK->AES-128",     &SPECK_,     &AES128     },
-    { "ChaCha20->AES-256",  &CHACHA20,   &AES256     },
-    { "SPECK->ChaCha20",    &SPECK_,     &CHACHA20   },
-    { "ChaCha20->SPECK",    &CHACHA20,   &SPECK_     },
-    { "SPECK->RECTANGLE",   &SPECK_,     &HIGHT_ },
-    { "HIGHT->RECTANGLE",   &HIGHT_,     &RECTANGLE_ },
+    { "ECC+AES-128+AES-256",   &AES128,    &AES256   },
+    { "ECC+ChaCha20+AES-256",  &CHACHA20,  &AES256   },
+    { "ECC+SPECK+AES-128",     &SPECK_,    &AES128   },
+    { "ECC+ChaCha20+SPECK",    &CHACHA20,  &SPECK_   },
+    { "ECC+SPECK+HIGHT",       &SPECK_,    &HIGHT_   },
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
 
@@ -290,15 +278,13 @@ static void fill_random(uint8_t *buf, size_t len) {
 
 typedef struct {
     int valid;
-    double enc_ms, dec_ms;              /* TOTAL across both layers */
+    double ecc_ms;                      /* TOTAL of both ECDH handshakes */
+    double enc_ms, dec_ms;              /* TOTAL across both cipher layers */
     double thr_enc_mbps, thr_dec_mbps;  /* against original plaintext size */
-    double latency_us;                  /* NA if neither layer is block-based */
+    double latency_us;
     double mem_enc_kb, mem_dec_kb;      /* SUM of both layers' isolated footprint */
 } result_t;
 
-/* Measures memory for a SINGLE layer's single enc+dec call, isolated
- * (fresh stack canary + heap delta), matching benchmark1.c's approach.
- * Called twice per cascade (once per layer) and the two results summed. */
 static void measure_layer_memory(algo_t *algo, const uint8_t *key,
                                   const uint8_t *in, size_t in_len,
                                   double *mem_enc_kb_out, double *mem_dec_kb_out,
@@ -342,11 +328,10 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
     algo_t *L1 = casc->layer1;
     algo_t *L2 = casc->layer2;
 
-    uint8_t *key1 = (uint8_t *)malloc(L1->key_len_bytes);
-    uint8_t *key2 = (uint8_t *)malloc(L2->key_len_bytes);
     uint8_t *plaintext = (uint8_t *)malloc(data_size);
     fill_random(plaintext, data_size);
 
+    double *ecc_means      = (double *)malloc(sizeof(double) * outer_repeats);
     double *enc_means      = (double *)malloc(sizeof(double) * outer_repeats);
     double *dec_means      = (double *)malloc(sizeof(double) * outer_repeats);
     double *thr_enc_means  = (double *)malloc(sizeof(double) * outer_repeats);
@@ -355,14 +340,26 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
     double *mem_enc_means  = (double *)malloc(sizeof(double) * outer_repeats);
     double *mem_dec_means  = (double *)malloc(sizeof(double) * outer_repeats);
 
-    printf("[pid %d] [%s | %s] starting: %d outer repeats x %d inner loops (independent keys per layer)\n",
+    printf("[pid %d] [%s | %s] starting: %d outer repeats x %d inner loops (2 independent ECDH handshakes per repeat)\n",
            getpid(), casc->pair_name, sz->label, outer_repeats, inner_loops);
     fflush(stdout);
 
     for (int r = 0; r < outer_repeats; r++) {
-        /* fresh independent keys every repeat, per Maurer/Massey cascade requirement */
-        fill_random(key1, L1->key_len_bytes);
-        fill_random(key2, L2->key_len_bytes);
+        uint8_t key1[32], key2[32]; /* max size needed (AES-256) */
+
+        /* --- fresh independent ECDH handshake for EACH layer's key --- */
+        double ecc_t0 = now_ms();
+        int ok1 = get_shared_key(key1, L1->key_len_bytes);
+        double ecc_t1 = now_ms();
+        int ok2 = get_shared_key(key2, L2->key_len_bytes);
+        double ecc_t2 = now_ms();
+        double ecc_ms = (ecc_t1 - ecc_t0) + (ecc_t2 - ecc_t1);
+
+        if (!ok1 || !ok2) {
+            fprintf(stderr, "[pid %d] [%s | %s] repeat %d: ECC handshake failed, skipping\n",
+                    getpid(), casc->pair_name, sz->label, r + 1);
+            continue;
+        }
 
         double sum_enc_ms = 0.0, sum_dec_ms = 0.0;
 
@@ -378,7 +375,7 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
             double t2 = now_ms();
             sum_enc_ms += (t2 - t0);
 
-            /* --- CASCADE DECRYPT (reverse order): ct2 -> L2^-1 -> ct1' -> L1^-1 -> plaintext' --- */
+            /* --- CASCADE DECRYPT (reverse order) --- */
             uint8_t *dt1 = NULL; size_t dt1_len = 0;
             uint8_t *dt0 = NULL; size_t dt0_len = 0;
 
@@ -425,6 +422,7 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
             latency_us = (mean_enc_ms * 1000.0) / (double)n_blocks;
         }
 
+        ecc_means[r] = ecc_ms;
         enc_means[r] = mean_enc_ms;
         dec_means[r] = mean_dec_ms;
         thr_enc_means[r] = thr_enc_mbps;
@@ -433,12 +431,13 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
         mem_enc_means[r] = mem_enc_kb;
         mem_dec_means[r] = mem_dec_kb;
 
-        printf("[pid %d] [%s | %s] repeat %d/%d - enc=%.4fms dec=%.4fms mem_enc=%.4fKB mem_dec=%.4fKB\n",
+        printf("[pid %d] [%s | %s] repeat %d/%d - ecc=%.4fms enc=%.4fms dec=%.4fms mem_enc=%.4fKB mem_dec=%.4fKB\n",
                getpid(), casc->pair_name, sz->label, r + 1, outer_repeats,
-               mean_enc_ms, mean_dec_ms, mem_enc_kb, mem_dec_kb);
+               ecc_ms, mean_enc_ms, mean_dec_ms, mem_enc_kb, mem_dec_kb);
         fflush(stdout);
     }
 
+    res.ecc_ms = median(ecc_means, outer_repeats);
     res.enc_ms = median(enc_means, outer_repeats);
     res.dec_ms = median(dec_means, outer_repeats);
     res.thr_enc_mbps = median(thr_enc_means, outer_repeats);
@@ -448,7 +447,8 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
     res.mem_dec_kb = median(mem_dec_means, outer_repeats);
     res.valid = 1;
 
-    free(key1); free(key2); free(plaintext);
+    free(plaintext);
+    free(ecc_means);
     free(enc_means); free(dec_means);
     free(thr_enc_means); free(thr_dec_means);
     free(lat_means); free(mem_enc_means); free(mem_dec_means);
@@ -468,14 +468,14 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD, 128 * 1024 * 1024);
     mallopt(M_MMAP_MAX, 0);
 
-    FILE *csv = fopen("phase3_results.csv", "w");
+    FILE *csv = fopen("phase4_results.csv", "w");
     if (!csv) {
-        fprintf(stderr, "Failed to open phase3_results.csv for writing\n");
+        fprintf(stderr, "Failed to open phase4_results.csv for writing\n");
         return 1;
     }
 
     fprintf(csv,
-        "cascade,data_size,enc_ms,dec_ms,"
+        "cascade,data_size,ecc_ms,enc_ms,dec_ms,"
         "throughput_enc_mbps,throughput_dec_mbps,"
         "latency_us,memory_enc_kb,memory_dec_kb\n");
 
@@ -524,22 +524,22 @@ int main(int argc, char **argv) {
             int has_block_layer = CASCADES[c].layer1->is_block_cipher || CASCADES[c].layer2->is_block_cipher;
 
             if (has_block_layer) {
-                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
                         CASCADES[c].pair_name, SIZES[s].label,
-                        res.enc_ms, res.dec_ms,
+                        res.ecc_ms, res.enc_ms, res.dec_ms,
                         res.thr_enc_mbps, res.thr_dec_mbps,
                         res.latency_us, res.mem_enc_kb, res.mem_dec_kb);
             } else {
-                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f\n",
+                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f\n",
                         CASCADES[c].pair_name, SIZES[s].label,
-                        res.enc_ms, res.dec_ms,
+                        res.ecc_ms, res.enc_ms, res.dec_ms,
                         res.thr_enc_mbps, res.thr_dec_mbps,
                         res.mem_enc_kb, res.mem_dec_kb);
             }
             fflush(csv);
 
-            printf("[parent] [%s | %s] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_kb=%.4f mem_dec_kb=%.4f\n\n",
-                   CASCADES[c].pair_name, SIZES[s].label, res.enc_ms, res.dec_ms,
+            printf("[parent] [%s | %s] finished -> ecc_ms=%.4f enc_ms=%.4f dec_ms=%.4f mem_enc_kb=%.4f mem_dec_kb=%.4f\n\n",
+                   CASCADES[c].pair_name, SIZES[s].label, res.ecc_ms, res.enc_ms, res.dec_ms,
                    res.mem_enc_kb, res.mem_dec_kb);
             fflush(stdout);
         }
