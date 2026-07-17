@@ -1,50 +1,14 @@
-
 /*
  * benchmark3.c - PRISEC-IV Phase 3 Benchmark (cascade / dual-layer encryption)
  *
- * Cascade pairs (layer1 -> layer2), each with an INDEPENDENT key per layer:
+ * Cascade pairs (layer1 -> layer2):
  *   AES-128   -> AES-256
- *   HIGHT     -> AES-128
- *   SPECK     -> AES-128
+ *   AES-128   -> HIGHT
+ *   AES-128   -> SPECK
  *   ChaCha20  -> AES-256
- *   SPECK     -> ChaCha20
  *   ChaCha20  -> SPECK
- *   SPECK     -> RECTANGLE
+ *   SPECK     -> HIGHT
  *   HIGHT     -> RECTANGLE
- *
- * Cascade encryption: plaintext -> layer1_encrypt -> ciphertext1
- *                      ciphertext1 -> layer2_encrypt -> ciphertext2 (final)
- * Cascade decryption (reverse order): ciphertext2 -> layer2_decrypt -> ciphertext1
- *                      ciphertext1 -> layer1_decrypt -> plaintext (recovered)
- *
- * Per Maurer/Massey cascade theorem, using independent keys per layer means
- * the cascade is never weaker than its strongest single layer, regardless
- * of layer order. Layer order here follows the pairs exactly as specified
- * (kept as-is even where it produces extra PKCS7 padding overhead, e.g.
- * pairs starting with an 8-byte-block cipher like HIGHT/SPECK/RECTANGLE
- * feeding into a 16-byte-block cipher like AES, since 16 is not always a
- * clean multiple of the intermediate padded length).
- *
- * ALL metrics reported are TOTALS across both layers, as requested:
- *   enc_ms      = layer1_enc_ms + layer2_enc_ms
- *   dec_ms      = layer1_dec_ms + layer2_dec_ms  (reverse-order layers)
- *   throughput  = computed from total enc_ms/dec_ms against original
- *                 plaintext size (not intermediate ciphertext size),
- *                 so it reflects the true end-to-end user-facing rate.
- *   latency_us  = total enc_ms / number of *original* plaintext blocks
- *                 (using the block size of whichever layer is block-based;
- *                 if both layers are block ciphers, layer1's block size is
- *                 used since that's what the original plaintext is chunked
- *                 into first; NA if neither layer is a block cipher)
- *   memory_enc_kb / memory_dec_kb = SUM of both layers' isolated
- *                 heap+stack footprint (layer1 measured, then layer2
- *                 measured independently, then added together)
- *
- * Process isolation + tcache fix: identical strategy to benchmark1.c /
- * benchmark2.c. Each (pair, data_size) combo runs in its own fork()'d
- * child. Binary re-execs itself once at startup with
- * glibc.malloc.tcache_count=0 so mallinfo2() can see every allocation
- * during the isolated memory-measurement call.
  *
  * Build:
  *   gcc -O2 -fno-stack-protector -o benchmark3 benchmark3.c -lcrypto -lm
@@ -258,14 +222,13 @@ typedef struct {
 } cascade_t;
 
 static cascade_t CASCADES[] = {
-    { "AES-128->AES-256",   &AES128,     &AES256     },
-    { "HIGHT->AES-128",     &HIGHT_,     &AES128     },
-    { "SPECK->AES-128",     &SPECK_,     &AES128     },
-    { "ChaCha20->AES-256",  &CHACHA20,   &AES256     },
-    { "SPECK->ChaCha20",    &SPECK_,     &CHACHA20   },
-    { "ChaCha20->SPECK",    &CHACHA20,   &SPECK_     },
-    { "SPECK->RECTANGLE",   &SPECK_,     &HIGHT_ },
-    { "HIGHT->RECTANGLE",   &HIGHT_,     &RECTANGLE_ },
+    { "AES-128->AES-256",   &AES128,   &AES256     },
+    { "AES-128->HIGHT",     &AES128,   &HIGHT_     },
+    { "AES-128->SPECK",     &AES128,   &SPECK_     },
+    { "ChaCha20->AES-256",  &CHACHA20, &AES256     },
+    { "ChaCha20->SPECK",    &CHACHA20, &SPECK_     },
+    { "SPECK->HIGHT",       &SPECK_,   &HIGHT_     },
+    { "HIGHT->RECTANGLE",   &HIGHT_,   &RECTANGLE_ },
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
 
@@ -290,15 +253,12 @@ static void fill_random(uint8_t *buf, size_t len) {
 
 typedef struct {
     int valid;
-    double enc_ms, dec_ms;              /* TOTAL across both layers */
-    double thr_enc_mbps, thr_dec_mbps;  /* against original plaintext size */
-    double latency_us;                  /* NA if neither layer is block-based */
-    double mem_enc_kb, mem_dec_kb;      /* SUM of both layers' isolated footprint */
+    double enc_ms, dec_ms;
+    double thr_enc_mbps, thr_dec_mbps;
+    double latency_us;
+    double mem_enc_kb, mem_dec_kb;
 } result_t;
 
-/* Measures memory for a SINGLE layer's single enc+dec call, isolated
- * (fresh stack canary + heap delta), matching benchmark1.c's approach.
- * Called twice per cascade (once per layer) and the two results summed. */
 static void measure_layer_memory(algo_t *algo, const uint8_t *key,
                                   const uint8_t *in, size_t in_len,
                                   double *mem_enc_kb_out, double *mem_dec_kb_out,
@@ -360,14 +320,12 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
     fflush(stdout);
 
     for (int r = 0; r < outer_repeats; r++) {
-        /* fresh independent keys every repeat, per Maurer/Massey cascade requirement */
         fill_random(key1, L1->key_len_bytes);
         fill_random(key2, L2->key_len_bytes);
 
         double sum_enc_ms = 0.0, sum_dec_ms = 0.0;
 
         for (int i = 0; i < inner_loops; i++) {
-            /* --- CASCADE ENCRYPT: plaintext -> L1 -> ct1 -> L2 -> ct2 --- */
             uint8_t *ct1 = NULL; size_t ct1_len = 0;
             uint8_t *ct2 = NULL; size_t ct2_len = 0;
 
@@ -378,7 +336,6 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
             double t2 = now_ms();
             sum_enc_ms += (t2 - t0);
 
-            /* --- CASCADE DECRYPT (reverse order): ct2 -> L2^-1 -> ct1' -> L1^-1 -> plaintext' --- */
             uint8_t *dt1 = NULL; size_t dt1_len = 0;
             uint8_t *dt0 = NULL; size_t dt0_len = 0;
 
@@ -396,7 +353,6 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
         double mean_enc_ms = sum_enc_ms / inner_loops;
         double mean_dec_ms = sum_dec_ms / inner_loops;
 
-        /* --- MEMORY: measure each layer isolated, then SUM --- */
         double l1_mem_enc = 0.0, l1_mem_dec = 0.0;
         uint8_t *ct1_for_mem = NULL; size_t ct1_len_for_mem = 0;
         measure_layer_memory(L1, key1, plaintext, data_size,

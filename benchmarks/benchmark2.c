@@ -1,3 +1,20 @@
+/*
+ * benchmark2.c - PRISEC-IV Phase 2 Benchmark (ECC handshake + Cipher)
+ *
+ *   ECC + AES-128
+ *   ECC + AES-256
+ *   ECC + ChaCha20
+ *   ECC + SPECK
+ *   ECC + RECTANGLE
+ *   ECC + HIGHT
+ * 
+ *
+ * Build:
+ *   gcc -O2 -fno-stack-protector -o benchmark2 benchmark2.c -lcrypto -lm
+ * Run:
+ *   ./benchmark2
+ */
+
 #define _POSIX_C_SOURCE 199309L
 #define _GNU_SOURCE
 
@@ -6,11 +23,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
-#include <math.h>
-#include <malloc.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/wait.h>
+#include <malloc.h>
+#include <math.h>
 
 #include "aes.h"
 #include "chacha20.h"
@@ -63,13 +79,6 @@ static inline int get_inner_loops(size_t size_n) {
     else return 1;
 }
 
-/* NOTE: outer_repeats now also controls how many *fresh ECC handshakes*
- * are performed per combo (one per repeat). ECDH keygen+derive is not
- * free (~0.1-0.5ms typically), so keep this reasonable; the timing inner
- * loop below still runs the cheap symmetric cipher many times per single
- * handshake, matching how a real session would reuse one negotiated key
- * for many messages -- except here we deliberately renegotiate every
- * repeat because that's what was requested (new connection every time). */
 static inline int get_outer_repeats(size_t size_n) {
     if (size_n <= 10 * 1024) return 300;
     else if (size_n <= 1 * 1024 * 1024) return 100;
@@ -198,12 +207,12 @@ typedef struct {
 } algo_t;
 
 static algo_t ALGOS[] = {
-    { "ECC+AES-128",   16, 1, 16, wrap_aes_enc,    wrap_aes_dec    },
-    { "ECC+AES-256",   32, 1, 16, wrap_aes_enc,    wrap_aes_dec    },
-    { "ECC+ChaCha20",  32, 0,  0, wrap_chacha_enc, wrap_chacha_dec },
-    { "ECC+SPECK",     16, 1, 16, wrap_speck_enc,  wrap_speck_dec  },
-    { "ECC+RECTANGLE", 16, 1,  8, wrap_rect_enc,   wrap_rect_dec   },
-    { "ECC+HIGHT",     16, 1,  8, wrap_hight_enc,  wrap_hight_dec  },
+    { "ECC+AES-128",    16, 1, 16, wrap_aes_enc,    wrap_aes_dec },
+    { "ECC+AES-256",    32, 1, 16, wrap_aes_enc,    wrap_aes_dec },
+    { "ECC+ChaCha20",   32, 0, 0,  wrap_chacha_enc, wrap_chacha_dec },
+    { "ECC+SPECK",      16, 1, 16, wrap_speck_enc,  wrap_speck_dec },
+    { "ECC+RECTANGLE",  16, 1, 8,  wrap_rect_enc,   wrap_rect_dec },
+    { "ECC+HIGHT",      16, 1, 8,  wrap_hight_enc,  wrap_hight_dec },
 };
 #define N_ALGOS (int)(sizeof(ALGOS)/sizeof(ALGOS[0]))
 
@@ -276,47 +285,72 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
     uint8_t *plaintext = (uint8_t *)malloc(data_size);
     fill_random(plaintext, data_size);
 
-    double *ecc_means      = (double *)malloc(sizeof(double) * outer_repeats);
-    double *enc_means      = (double *)malloc(sizeof(double) * outer_repeats);
-    double *dec_means      = (double *)malloc(sizeof(double) * outer_repeats);
-    double *thr_enc_means  = (double *)malloc(sizeof(double) * outer_repeats);
-    double *thr_dec_means  = (double *)malloc(sizeof(double) * outer_repeats);
-    double *lat_means      = (double *)malloc(sizeof(double) * outer_repeats);
-    double *mem_enc_means  = (double *)malloc(sizeof(double) * outer_repeats);
-    double *mem_dec_means  = (double *)malloc(sizeof(double) * outer_repeats);
+    double *ecc_means     = (double *)malloc(sizeof(double) * outer_repeats);
+    double *enc_means     = (double *)malloc(sizeof(double) * outer_repeats);
+    double *dec_means     = (double *)malloc(sizeof(double) * outer_repeats);
+    double *thr_enc_means = (double *)malloc(sizeof(double) * outer_repeats);
+    double *thr_dec_means = (double *)malloc(sizeof(double) * outer_repeats);
+    double *lat_means     = (double *)malloc(sizeof(double) * outer_repeats);
+    double *mem_enc_means = (double *)malloc(sizeof(double) * outer_repeats);
+    double *mem_dec_means = (double *)malloc(sizeof(double) * outer_repeats);
 
-    printf("[pid %d] [%s | %s] starting: %d outer repeats x %d inner loops (fresh ECC handshake per repeat)\n",
-           getpid(), algo->name, sz->label, outer_repeats, inner_loops);
+    uint8_t (*keys)[32] = malloc(sizeof(uint8_t[32]) * outer_repeats);
+    int *handshake_ok = (int *)calloc(outer_repeats, sizeof(int));
+
+    printf("[pid %d] [%s | %s] starting: %d outer repeats x %d inner loops "
+           "(Phase A: %d ECC handshakes, then warmup, then Phase B: symmetric timing)\n",
+           getpid(), algo->name, sz->label, outer_repeats, inner_loops, outer_repeats);
     fflush(stdout);
 
     for (int r = 0; r < outer_repeats; r++) {
-        /* ---- 1) NEW SECURE CONNECTION: fresh ECC (ECDH P-256) handshake ---- */
-        uint8_t key[32]; /* max symmetric key size we need (AES-256) */
         double ecc_t0 = now_ms();
-        int ecc_ok = get_shared_key(key, algo->key_len_bytes);
+        int ecc_ok = get_shared_key(keys[r], algo->key_len_bytes);
         double ecc_t1 = now_ms();
         double ecc_ms = ecc_t1 - ecc_t0;
 
+        handshake_ok[r] = ecc_ok;
+        ecc_means[r] = ecc_ms;
+
         if (!ecc_ok) {
-            fprintf(stderr, "[pid %d] [%s | %s] repeat %d: ECC handshake failed, skipping\n",
+            fprintf(stderr, "[pid %d] [%s | %s] repeat %d: ECC handshake failed\n",
                     getpid(), algo->name, sz->label, r + 1);
+        }
+    }
+
+    {
+        int warm_idx = 0;
+        while (warm_idx < outer_repeats && !handshake_ok[warm_idx]) warm_idx++;
+        if (warm_idx < outer_repeats) {
+            uint8_t *wct = NULL; size_t wct_len = 0;
+            uint8_t *wpt = NULL; size_t wpt_len = 0;
+            algo->enc(keys[warm_idx], algo->key_len_bytes, plaintext, data_size, &wct, &wct_len);
+            if (wct) algo->dec(keys[warm_idx], algo->key_len_bytes, wct, wct_len, &wpt, &wpt_len);
+            free(wct);
+            free(wpt);
+        }
+    }
+
+    for (int r = 0; r < outer_repeats; r++) {
+        if (!handshake_ok[r]) {
+            enc_means[r] = NAN; dec_means[r] = NAN;
+            thr_enc_means[r] = NAN; thr_dec_means[r] = NAN;
+            lat_means[r] = NAN; mem_enc_means[r] = NAN; mem_dec_means[r] = NAN;
             continue;
         }
 
-        /* ---- 2) TIMING LOOP: symmetric cipher speed using the freshly negotiated key ---- */
         double sum_enc_ms = 0.0, sum_dec_ms = 0.0;
 
         for (int i = 0; i < inner_loops; i++) {
             uint8_t *ct = NULL; size_t ct_len = 0;
 
             double t0 = now_ms();
-            algo->enc(key, algo->key_len_bytes, plaintext, data_size, &ct, &ct_len);
+            algo->enc(keys[r], algo->key_len_bytes, plaintext, data_size, &ct, &ct_len);
             double t1 = now_ms();
             sum_enc_ms += (t1 - t0);
 
             uint8_t *pt = NULL; size_t pt_len = 0;
             double t2 = now_ms();
-            algo->dec(key, algo->key_len_bytes, ct, ct_len, &pt, &pt_len);
+            algo->dec(keys[r], algo->key_len_bytes, ct, ct_len, &pt, &pt_len);
             double t3 = now_ms();
             sum_dec_ms += (t3 - t2);
 
@@ -327,9 +361,8 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
         double mean_enc_ms = sum_enc_ms / inner_loops;
         double mean_dec_ms = sum_dec_ms / inner_loops;
 
-        /* ---- 3) MEMORY MEASUREMENT: single isolated call with same key ---- */
         double mem_enc_kb = 0.0, mem_dec_kb = 0.0;
-        measure_memory_isolated(algo, key, plaintext, data_size, &mem_enc_kb, &mem_dec_kb);
+        measure_memory_isolated(algo, keys[r], plaintext, data_size, &mem_enc_kb, &mem_dec_kb);
 
         double data_mbits = (double)data_size * 8.0 / 1e6;
         double thr_enc_mbps = (mean_enc_ms > 0) ? (data_mbits / (mean_enc_ms / 1000.0)) : 0.0;
@@ -341,7 +374,6 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
             latency_us = (mean_enc_ms * 1000.0) / (double)n_blocks;
         }
 
-        ecc_means[r] = ecc_ms;
         enc_means[r] = mean_enc_ms;
         dec_means[r] = mean_dec_ms;
         thr_enc_means[r] = thr_enc_mbps;
@@ -352,21 +384,54 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
 
         printf("[pid %d] [%s | %s] repeat %d/%d - ecc=%.4fms enc=%.4fms dec=%.4fms mem_enc=%.4fKB mem_dec=%.4fKB\n",
                getpid(), algo->name, sz->label, r + 1, outer_repeats,
-               ecc_ms, mean_enc_ms, mean_dec_ms, mem_enc_kb, mem_dec_kb);
+               ecc_means[r], mean_enc_ms, mean_dec_ms, mem_enc_kb, mem_dec_kb);
         fflush(stdout);
     }
 
-    res.ecc_ms = median(ecc_means, outer_repeats);
-    res.enc_ms = median(enc_means, outer_repeats);
-    res.dec_ms = median(dec_means, outer_repeats);
-    res.thr_enc_mbps = median(thr_enc_means, outer_repeats);
-    res.thr_dec_mbps = median(thr_dec_means, outer_repeats);
-    res.latency_us = algo->is_block_cipher ? median(lat_means, outer_repeats) : NAN;
-    res.mem_enc_kb = median(mem_enc_means, outer_repeats);
-    res.mem_dec_kb = median(mem_dec_means, outer_repeats);
-    res.valid = 1;
+    int valid_count = 0;
+    for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) valid_count++;
+
+    if (valid_count > 0) {
+        double *tmp = (double *)malloc(sizeof(double) * valid_count);
+        int idx;
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = ecc_means[r];
+        res.ecc_ms = median(tmp, valid_count);
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = enc_means[r];
+        res.enc_ms = median(tmp, valid_count);
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = dec_means[r];
+        res.dec_ms = median(tmp, valid_count);
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = thr_enc_means[r];
+        res.thr_enc_mbps = median(tmp, valid_count);
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = thr_dec_means[r];
+        res.thr_dec_mbps = median(tmp, valid_count);
+
+        if (algo->is_block_cipher) {
+            idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = lat_means[r];
+            res.latency_us = median(tmp, valid_count);
+        } else {
+            res.latency_us = NAN;
+        }
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_enc_means[r];
+        res.mem_enc_kb = median(tmp, valid_count);
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_dec_means[r];
+        res.mem_dec_kb = median(tmp, valid_count);
+
+        free(tmp);
+        res.valid = 1;
+    } else {
+        res.valid = 0;
+    }
 
     free(plaintext);
+    free(keys);
+    free(handshake_ok);
     free(ecc_means);
     free(enc_means); free(dec_means);
     free(thr_enc_means); free(thr_dec_means);
@@ -376,10 +441,6 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
 }
 
 int main(int argc, char **argv) {
-    /* Same tcache fix as benchmark1.c - required so mallinfo2() can see
-     * small allocations (RECTANGLE/HIGHT/ECC buffers) during the
-     * isolated memory-measurement call instead of them being served
-     * silently from the per-thread tcache, which mallinfo2() cannot see. */
     if (!getenv("PRISEC_TCACHE_DISABLED")) {
         setenv("GLIBC_TUNABLES", "glibc.malloc.tcache_count=0", 1);
         setenv("PRISEC_TCACHE_DISABLED", "1", 1);
@@ -446,22 +507,22 @@ int main(int argc, char **argv) {
 
             if (ALGOS[a].is_block_cipher) {
                 fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-                        ALGOS[a].name, SIZES[s].label,
-                        res.ecc_ms, res.enc_ms, res.dec_ms,
-                        res.thr_enc_mbps, res.thr_dec_mbps,
-                        res.latency_us, res.mem_enc_kb, res.mem_dec_kb);
+                    ALGOS[a].name, SIZES[s].label,
+                    res.ecc_ms, res.enc_ms, res.dec_ms,
+                    res.thr_enc_mbps, res.thr_dec_mbps,
+                    res.latency_us, res.mem_enc_kb, res.mem_dec_kb);
             } else {
                 fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f\n",
-                        ALGOS[a].name, SIZES[s].label,
-                        res.ecc_ms, res.enc_ms, res.dec_ms,
-                        res.thr_enc_mbps, res.thr_dec_mbps,
-                        res.mem_enc_kb, res.mem_dec_kb);
+                    ALGOS[a].name, SIZES[s].label,
+                    res.ecc_ms, res.enc_ms, res.dec_ms,
+                    res.thr_enc_mbps, res.thr_dec_mbps,
+                    res.mem_enc_kb, res.mem_dec_kb);
             }
             fflush(csv);
 
             printf("[parent] [%s | %s] finished -> ecc_ms=%.4f enc_ms=%.4f dec_ms=%.4f mem_enc_kb=%.4f mem_dec_kb=%.4f\n\n",
-                   ALGOS[a].name, SIZES[s].label, res.ecc_ms, res.enc_ms, res.dec_ms,
-                   res.mem_enc_kb, res.mem_dec_kb);
+                ALGOS[a].name, SIZES[s].label, res.ecc_ms, res.enc_ms, res.dec_ms,
+                res.mem_enc_kb, res.mem_dec_kb);
             fflush(stdout);
         }
     }

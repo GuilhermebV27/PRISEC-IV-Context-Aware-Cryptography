@@ -1,3 +1,20 @@
+/*
+ * benchmark1.c - PRISEC-IV Phase 1 Benchmark (Single Cipher)
+ *
+ *   AES-128
+ *   AES-192
+ *   AES-256
+ *   ChaCha20
+ *   SPECK
+ *   RECTANGLE
+ *   HIGHT
+ * 
+ *
+ * Build:
+ *   gcc -O2 -fno-stack-protector -o benchmark1 benchmark1.c -lcrypto -lm
+ * Run:
+ *   ./benchmark1
+ */
 #define _POSIX_C_SOURCE 199309L
 #define _GNU_SOURCE
 
