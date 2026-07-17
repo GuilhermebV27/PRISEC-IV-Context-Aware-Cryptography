@@ -264,7 +264,7 @@ static cascade_t CASCADES[] = {
     { "ChaCha20->AES-256",  &CHACHA20,   &AES256     },
     { "SPECK->ChaCha20",    &SPECK_,     &CHACHA20   },
     { "ChaCha20->SPECK",    &CHACHA20,   &SPECK_     },
-    { "SPECK->RECTANGLE",   &SPECK_,     &HIGHT_ },
+    { "SPECK->HIGHT",   &SPECK_,     &HIGHT_ },
     { "HIGHT->RECTANGLE",   &HIGHT_,     &RECTANGLE_ },
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
