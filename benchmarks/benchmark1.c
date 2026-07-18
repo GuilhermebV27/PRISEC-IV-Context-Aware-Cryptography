@@ -279,7 +279,7 @@ static void measure_memory_isolated(algo_t *algo, const uint8_t *key,
     free(pt);
 
     mallopt(M_MMAP_THRESHOLD, 128 * 1024 * 1024);
-    mallopt(M_TRIM_THRESHOLD, 128 * 1024);
+    mallopt(M_TRIM_THRESHOLD, -1);
 }
 
 static result_t run_combo(algo_t *algo, size_entry_t *sz) {
@@ -375,12 +375,6 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
 }
 
 int main(int argc, char **argv) {
-    /* tcache recycles small (<=~1032B) freed chunks per-thread without going
-     * through the arena, and mallinfo2() cannot see tcache at all. That makes
-     * heap-delta memory measurements read near-zero for any buffer size that
-     * falls in tcache's range (exactly what happened to RECTANGLE/HIGHT at 1KB).
-     * Tcache tunables can only be set before libc finishes initializing, which
-     * is before main() runs, so we re-exec ourselves once with it disabled. */
     if (!getenv("PRISEC_TCACHE_DISABLED")) {
         setenv("GLIBC_TUNABLES", "glibc.malloc.tcache_count=0", 1);
         setenv("PRISEC_TCACHE_DISABLED", "1", 1);
@@ -391,6 +385,7 @@ int main(int argc, char **argv) {
 
     mallopt(M_MMAP_THRESHOLD, 128 * 1024 * 1024);
     mallopt(M_MMAP_MAX, 0);
+    mallopt(M_TRIM_THRESHOLD, -1);
 
     FILE *csv = fopen("phase1_results.csv", "w");
     if (!csv) {

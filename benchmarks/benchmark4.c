@@ -498,6 +498,7 @@ int main(int argc, char **argv) {
 
     mallopt(M_MMAP_THRESHOLD, 128 * 1024 * 1024);
     mallopt(M_MMAP_MAX, 0);
+    mallopt(M_TRIM_THRESHOLD, -1);
 
     FILE *csv = fopen("phase4_results.csv", "w");
     if (!csv) {
