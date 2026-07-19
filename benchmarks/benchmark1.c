@@ -248,9 +248,6 @@ typedef struct {
 static void measure_memory_isolated(algo_t *algo, const uint8_t *key,
                                      const uint8_t *plaintext, size_t data_size,
                                      double *mem_enc_kb_out, double *mem_dec_kb_out) {
-    mallopt(M_MMAP_THRESHOLD, 0);
-    mallopt(M_TRIM_THRESHOLD, 0);
-
     uint8_t *ct = NULL; size_t ct_len = 0;
 
     size_t heap_before_enc = heap_used_bytes();
@@ -277,9 +274,6 @@ static void measure_memory_isolated(algo_t *algo, const uint8_t *key,
 
     free(ct);
     free(pt);
-
-    mallopt(M_MMAP_THRESHOLD, 128 * 1024 * 1024);
-    mallopt(M_TRIM_THRESHOLD, -1);
 }
 
 static result_t run_combo(algo_t *algo, size_entry_t *sz) {
