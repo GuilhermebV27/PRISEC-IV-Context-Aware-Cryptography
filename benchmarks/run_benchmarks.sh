@@ -21,7 +21,9 @@ set -e  # stop on first error
 set -o pipefail  # make sure tee doesn't hide a non-zero exit code
 
 CFLAGS="-O2 -fno-stack-protector"
-LIBS="-lcrypto -lm"
+# --wrap flags route all malloc/free/realloc/calloc calls through the peak
+# tracker in memtrack.h (required, otherwise linking fails)
+LIBS="-lcrypto -lm -Wl,--wrap=malloc,--wrap=free,--wrap=realloc,--wrap=calloc"
 
 LOG_DIR="./logs"
 mkdir -p "$LOG_DIR"
