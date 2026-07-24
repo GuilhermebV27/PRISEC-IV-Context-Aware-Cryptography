@@ -10,7 +10,8 @@
  * 
  *
  * Build:
- *   gcc -O2 -fno-stack-protector -o benchmark2 benchmark2.c -lcrypto -lm
+ *   gcc -O2 -fno-stack-protector -o benchmark2 benchmark2.c -lcrypto -lm \
+ *       -Wl,--wrap=malloc,--wrap=free,--wrap=realloc,--wrap=calloc
  * Run:
  *   ./benchmark2
  */
@@ -35,16 +36,12 @@
 #include "hight.h"
 #include "ecc.h"
 #include "utils.h"
+#include "memtrack.h"
 
 static inline double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
-}
-
-static inline size_t heap_used_bytes(void) {
-    struct mallinfo2 mi = mallinfo2();
-    return mi.uordblks + mi.hblkhd;
 }
 
 #define STACK_PROBE_SIZE (64 * 1024)
@@ -241,35 +238,48 @@ typedef struct {
     double enc_ms, dec_ms;
     double thr_enc_mbps, thr_dec_mbps;
     double latency_us;
-    double mem_enc_kb, mem_dec_kb;
+    double mem_enc_peak_kb, mem_dec_peak_kb;
+    double mem_enc_overhead_kb, mem_dec_overhead_kb;
 } result_t;
 
+/*
+ * Peak memory  = peak heap growth during the call (includes the output buffer
+ *                and every transient allocation, e.g. OpenSSL's EVP context)
+ *              + peak stack usage.
+ * Overhead     = peak memory minus the output buffer that any implementation
+ *                would need, i.e. the algorithm's own working memory.
+ */
 static void measure_memory_isolated(algo_t *algo, const uint8_t *key,
                                      const uint8_t *plaintext, size_t data_size,
-                                     double *mem_enc_kb_out, double *mem_dec_kb_out) {
+                                     double *mem_enc_peak_kb, double *mem_enc_overhead_kb,
+                                     double *mem_dec_peak_kb, double *mem_dec_overhead_kb) {
     uint8_t *ct = NULL; size_t ct_len = 0;
 
-    size_t heap_before_enc = heap_used_bytes();
+    size_t base_enc = mt_mark();
     stack_paint();
     algo->enc(key, algo->key_len_bytes, plaintext, data_size, &ct, &ct_len);
-    size_t stack_touched_enc = stack_measure();
-    size_t heap_after_enc = heap_used_bytes();
+    size_t stack_enc = stack_measure();
+    size_t heap_peak_enc = mt_peak_delta(base_enc);
 
-    long heap_delta_enc = (long)heap_after_enc - (long)heap_before_enc;
-    if (heap_delta_enc < 0) heap_delta_enc = 0;
-    *mem_enc_kb_out = ((double)heap_delta_enc + (double)stack_touched_enc) / 1024.0;
+    size_t ct_buf_bytes = ct ? malloc_usable_size(ct) : 0;
+    double total_enc = (double)heap_peak_enc + (double)stack_enc;
+    *mem_enc_peak_kb = total_enc / 1024.0;
+    double ovh_enc = total_enc - (double)ct_buf_bytes;
+    *mem_enc_overhead_kb = (ovh_enc > 0 ? ovh_enc : 0) / 1024.0;
 
     uint8_t *pt = NULL; size_t pt_len = 0;
 
-    size_t heap_before_dec = heap_used_bytes();
+    size_t base_dec = mt_mark();
     stack_paint();
     algo->dec(key, algo->key_len_bytes, ct, ct_len, &pt, &pt_len);
-    size_t stack_touched_dec = stack_measure();
-    size_t heap_after_dec = heap_used_bytes();
+    size_t stack_dec = stack_measure();
+    size_t heap_peak_dec = mt_peak_delta(base_dec);
 
-    long heap_delta_dec = (long)heap_after_dec - (long)heap_before_dec;
-    if (heap_delta_dec < 0) heap_delta_dec = 0;
-    *mem_dec_kb_out = ((double)heap_delta_dec + (double)stack_touched_dec) / 1024.0;
+    size_t pt_buf_bytes = pt ? malloc_usable_size(pt) : 0;
+    double total_dec = (double)heap_peak_dec + (double)stack_dec;
+    *mem_dec_peak_kb = total_dec / 1024.0;
+    double ovh_dec = total_dec - (double)pt_buf_bytes;
+    *mem_dec_overhead_kb = (ovh_dec > 0 ? ovh_dec : 0) / 1024.0;
 
     free(ct);
     free(pt);
@@ -291,8 +301,10 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
     double *thr_enc_means = (double *)malloc(sizeof(double) * outer_repeats);
     double *thr_dec_means = (double *)malloc(sizeof(double) * outer_repeats);
     double *lat_means     = (double *)malloc(sizeof(double) * outer_repeats);
-    double *mem_enc_means = (double *)malloc(sizeof(double) * outer_repeats);
-    double *mem_dec_means = (double *)malloc(sizeof(double) * outer_repeats);
+    double *mem_enc_peaks = (double *)malloc(sizeof(double) * outer_repeats);
+    double *mem_dec_peaks = (double *)malloc(sizeof(double) * outer_repeats);
+    double *mem_enc_ovhs  = (double *)malloc(sizeof(double) * outer_repeats);
+    double *mem_dec_ovhs  = (double *)malloc(sizeof(double) * outer_repeats);
 
     uint8_t (*keys)[32] = malloc(sizeof(uint8_t[32]) * outer_repeats);
     int *handshake_ok = (int *)calloc(outer_repeats, sizeof(int));
@@ -334,7 +346,9 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
         if (!handshake_ok[r]) {
             enc_means[r] = NAN; dec_means[r] = NAN;
             thr_enc_means[r] = NAN; thr_dec_means[r] = NAN;
-            lat_means[r] = NAN; mem_enc_means[r] = NAN; mem_dec_means[r] = NAN;
+            lat_means[r] = NAN;
+            mem_enc_peaks[r] = NAN; mem_dec_peaks[r] = NAN;
+            mem_enc_ovhs[r] = NAN; mem_dec_ovhs[r] = NAN;
             continue;
         }
 
@@ -361,8 +375,11 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
         double mean_enc_ms = sum_enc_ms / inner_loops;
         double mean_dec_ms = sum_dec_ms / inner_loops;
 
-        double mem_enc_kb = 0.0, mem_dec_kb = 0.0;
-        measure_memory_isolated(algo, keys[r], plaintext, data_size, &mem_enc_kb, &mem_dec_kb);
+        double mem_enc_peak = 0.0, mem_enc_ovh = 0.0;
+        double mem_dec_peak = 0.0, mem_dec_ovh = 0.0;
+        measure_memory_isolated(algo, keys[r], plaintext, data_size,
+                                &mem_enc_peak, &mem_enc_ovh,
+                                &mem_dec_peak, &mem_dec_ovh);
 
         double data_mbits = (double)data_size * 8.0 / 1e6;
         double thr_enc_mbps = (mean_enc_ms > 0) ? (data_mbits / (mean_enc_ms / 1000.0)) : 0.0;
@@ -379,12 +396,15 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
         thr_enc_means[r] = thr_enc_mbps;
         thr_dec_means[r] = thr_dec_mbps;
         lat_means[r] = latency_us;
-        mem_enc_means[r] = mem_enc_kb;
-        mem_dec_means[r] = mem_dec_kb;
+        mem_enc_peaks[r] = mem_enc_peak;
+        mem_dec_peaks[r] = mem_dec_peak;
+        mem_enc_ovhs[r]  = mem_enc_ovh;
+        mem_dec_ovhs[r]  = mem_dec_ovh;
 
-        printf("[pid %d] [%s | %s] repeat %d/%d - ecc=%.4fms enc=%.4fms dec=%.4fms mem_enc=%.4fKB mem_dec=%.4fKB\n",
+        printf("[pid %d] [%s | %s] repeat %d/%d - ecc=%.4fms enc=%.4fms dec=%.4fms mem_enc_peak=%.4fKB (ovh=%.4fKB) mem_dec_peak=%.4fKB (ovh=%.4fKB)\n",
                getpid(), algo->name, sz->label, r + 1, outer_repeats,
-               ecc_means[r], mean_enc_ms, mean_dec_ms, mem_enc_kb, mem_dec_kb);
+               ecc_means[r], mean_enc_ms, mean_dec_ms,
+               mem_enc_peak, mem_enc_ovh, mem_dec_peak, mem_dec_ovh);
         fflush(stdout);
     }
 
@@ -417,11 +437,17 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
             res.latency_us = NAN;
         }
 
-        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_enc_means[r];
-        res.mem_enc_kb = median(tmp, valid_count);
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_enc_peaks[r];
+        res.mem_enc_peak_kb = median(tmp, valid_count);
 
-        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_dec_means[r];
-        res.mem_dec_kb = median(tmp, valid_count);
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_dec_peaks[r];
+        res.mem_dec_peak_kb = median(tmp, valid_count);
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_enc_ovhs[r];
+        res.mem_enc_overhead_kb = median(tmp, valid_count);
+
+        idx = 0; for (int r = 0; r < outer_repeats; r++) if (handshake_ok[r]) tmp[idx++] = mem_dec_ovhs[r];
+        res.mem_dec_overhead_kb = median(tmp, valid_count);
 
         free(tmp);
         res.valid = 1;
@@ -435,12 +461,19 @@ static result_t run_combo(algo_t *algo, size_entry_t *sz) {
     free(ecc_means);
     free(enc_means); free(dec_means);
     free(thr_enc_means); free(thr_dec_means);
-    free(lat_means); free(mem_enc_means); free(mem_dec_means);
+    free(lat_means);
+    free(mem_enc_peaks); free(mem_dec_peaks);
+    free(mem_enc_ovhs); free(mem_dec_ovhs);
 
     return res;
 }
 
 int main(int argc, char **argv) {
+    if (!mt_install_openssl()) {
+        fprintf(stderr, "CRYPTO_set_mem_functions failed; OpenSSL memory would not be tracked\n");
+        return 1;
+    }
+
     if (!getenv("PRISEC_TCACHE_DISABLED")) {
         setenv("GLIBC_TUNABLES", "glibc.malloc.tcache_count=0", 1);
         setenv("PRISEC_TCACHE_DISABLED", "1", 1);
@@ -462,7 +495,8 @@ int main(int argc, char **argv) {
     fprintf(csv,
         "algorithm,data_size,ecc_ms,enc_ms,dec_ms,"
         "throughput_enc_mbps,throughput_dec_mbps,"
-        "latency_us,memory_enc_kb,memory_dec_kb\n");
+        "latency_us,memory_enc_peak_kb,memory_enc_overhead_kb,"
+        "memory_dec_peak_kb,memory_dec_overhead_kb\n");
 
     for (int a = 0; a < N_ALGOS; a++) {
         for (int s = 0; s < N_SIZES; s++) {
@@ -507,23 +541,27 @@ int main(int argc, char **argv) {
             }
 
             if (ALGOS[a].is_block_cipher) {
-                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
                     ALGOS[a].name, SIZES[s].label,
                     res.ecc_ms, res.enc_ms, res.dec_ms,
                     res.thr_enc_mbps, res.thr_dec_mbps,
-                    res.latency_us, res.mem_enc_kb, res.mem_dec_kb);
+                    res.latency_us,
+                    res.mem_enc_peak_kb, res.mem_enc_overhead_kb,
+                    res.mem_dec_peak_kb, res.mem_dec_overhead_kb);
             } else {
-                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f\n",
+                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f,%.4f,%.4f\n",
                     ALGOS[a].name, SIZES[s].label,
                     res.ecc_ms, res.enc_ms, res.dec_ms,
                     res.thr_enc_mbps, res.thr_dec_mbps,
-                    res.mem_enc_kb, res.mem_dec_kb);
+                    res.mem_enc_peak_kb, res.mem_enc_overhead_kb,
+                    res.mem_dec_peak_kb, res.mem_dec_overhead_kb);
             }
             fflush(csv);
 
-            printf("[parent] [%s | %s] finished -> ecc_ms=%.4f enc_ms=%.4f dec_ms=%.4f mem_enc_kb=%.4f mem_dec_kb=%.4f\n\n",
+            printf("[parent] [%s | %s] finished -> ecc_ms=%.4f enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f (ovh=%.4f) mem_dec_peak_kb=%.4f (ovh=%.4f)\n\n",
                 ALGOS[a].name, SIZES[s].label, res.ecc_ms, res.enc_ms, res.dec_ms,
-                res.mem_enc_kb, res.mem_dec_kb);
+                res.mem_enc_peak_kb, res.mem_enc_overhead_kb,
+                res.mem_dec_peak_kb, res.mem_dec_overhead_kb);
             fflush(stdout);
         }
     }
