@@ -1,6 +1,8 @@
-from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel
+
 
 class ProfileCreate(BaseModel):
     cpu_architecture: str
@@ -17,6 +19,9 @@ class ProfileOut(ProfileCreate):
 
     class Config:
         from_attributes = True
+
+class ProfileUpdate(ProfileCreate):
+    pass
 
 
 class DecisionCreate(BaseModel):

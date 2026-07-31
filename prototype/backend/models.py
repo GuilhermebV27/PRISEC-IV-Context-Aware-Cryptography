@@ -1,5 +1,16 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, Text, TIMESTAMP, ForeignKey, func
 from database import Base
+from sqlalchemy import (
+    TIMESTAMP,
+    Boolean,
+    Column,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+)
+
 
 class Profile(Base):
     __tablename__ = "profiles"
