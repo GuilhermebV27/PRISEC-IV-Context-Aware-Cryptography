@@ -76,18 +76,34 @@ export default function Home() {
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#0a0a0a] text-[#f5f5f5] font-sans">
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full opacity-[0.14] pointer-events-none" />
+      <canvas 
+        ref={canvasRef}
+        className="absolute inset-0 w-full h-full opacity-[0.14] pointer-events-none"
+        />
 
+<div className="relative w-full px-16">
       {/* Header */}
-      <div className="relative flex items-center justify-between px-12 pt-7">
-        <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">PRISEC-IV</div>
-        <button onClick={() => setMenuOpen(true)} aria-label="Open menu" className="p-2">
-          <Menu size={22} />
-        </button>
-      </div>
+      <header className="flex items-center pt-7">
 
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setMenuOpen(true)}
+            aria-label="Open menu"
+            className="p-2 hover:text-[#5b8cff] transition"
+          >
+            <Menu size={22} />
+          </button>
+
+          <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">
+            PRISEC-IV
+          </div>
+        </div>
+
+      </header>
+
+<div className="pl-[150px]">
       {/* Hero + Preview */}
-      <div className="relative flex gap-10 px-12 pt-16 pb-16 items-start flex-wrap">
+      <section className="flex gap-16 pt-16 pb-20 items-start flex-wrap">
         <div className="flex-1 min-w-[340px] max-w-[560px] pt-6">
           <h1 className="text-6xl leading-tight font-bold mb-6" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
             <div>Adaptive</div>
@@ -177,11 +193,10 @@ export default function Home() {
               </button>
           </div>
         </div>
-      </div>
+      </section>
 
 {/* How to use */}
-<div className="relative px-12 pb-20">
-  <div className="max-w-[1400px] mx-auto">
+<section className="pb-24">
     <div className="font-mono text-sm text-[#5b8cff] tracking-wide mb-8">
       HOW TO USE THIS PROTOTYPE
     </div>
@@ -199,7 +214,7 @@ export default function Home() {
         </div>
       ))}
     </div>
-  </div>
+  </section>
 </div>
 
       {/* Slide-out menu */}
@@ -220,5 +235,6 @@ export default function Home() {
         </div>
       )}
     </div>
+  </div>
   );
 }
