@@ -2,22 +2,82 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Shield } from "lucide-react";
+import { Shield, Pencil, Check } from "lucide-react";
 import { createProfile } from "../../lib/api";
+import { computeDeviceTier } from "../../lib/Devicetier";
 
-const CPU_OPTIONS = ["ARM Cortex-M4", "ARM Cortex-M0", "x86", "RISC-V RV32"];
+const CPU_OPTIONS = [
+  "8-bit MCU (AVR/PIC/8051)",
+  "16-bit MCU (MSP430/PIC24/RL78)",
+  "ARM Cortex-M0",
+  "ARM Cortex-M4",
+  "RISC-V RV32",
+  "Xtensa",
+  "ARM Cortex-R",
+  "x86",
+  "ARM Cortex-A (32-bit)",
+  "ARM Cortex-A (64-bit)",
+  "RISC-V RV64",
+  "x86_64",
+  "PowerPC (32-bit)",
+  "PowerPC (64-bit)",
+  "ARM64",
+  "MIPS64",
+];
+
+const CLOCK_MULTIPLIERS = { kHz: 0.001, MHz: 1, GHz: 1000 }; // → MHz
+const RAM_MULTIPLIERS = { kB: 1 / 1024, MB: 1, GB: 1024 }; // → MB
+
+function normalizeClockToMHz(value, unit) {
+  return parseFloat(value) * CLOCK_MULTIPLIERS[unit];
+}
+
+function normalizeRamToMB(value, unit) {
+  return parseFloat(value) * RAM_MULTIPLIERS[unit];
+}
+
+function mapDetectedArch(raw) {
+  const normalized = raw.toLowerCase();
+
+  if (normalized.includes("x86_64") || normalized === "amd64") return "x86_64";
+  if (normalized === "x86" || normalized === "i386" || normalized === "i686")
+    return "x86";
+
+  if (normalized.includes("aarch64") || normalized.includes("arm64"))
+    return "ARM64";
+
+  if (normalized.includes("armv6")) return "ARM Cortex-M0";
+  if (normalized.includes("armv7")) return "ARM Cortex-M4";
+  if (normalized.includes("arm")) return "ARM Cortex-M4"; // ambiguous ARM string — closest guess
+
+  if (normalized.includes("riscv64")) return "RISC-V RV64";
+  if (normalized.includes("riscv") || normalized.includes("rv32")) return "RISC-V RV32";
+
+  if (normalized.includes("mips64")) return "MIPS64";
+  if (normalized.includes("ppc64") || normalized.includes("powerpc64")) return "PowerPC (64-bit)";
+  if (normalized.includes("ppc") || normalized.includes("powerpc")) return "PowerPC (32-bit)";
+
+  return null; // unrecognized, or a category detection can't reach — fall back to manual selection
+}
 
 export default function NewProfilePage() {
   const router = useRouter();
   const canvasRef = useRef(null);
 
+  const [profileName, setProfileName] = useState("Device Profile");
+  const [editingName, setEditingName] = useState(false);
+  const [detected, setDetected] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+
   const [form, setForm] = useState({
-    cpu_architecture: "ARM Cortex-M4",
-    clock_speed: "1.2",
-    core_count: "4",
-    ram_size: "512",
-    battery_powered: true,
-    hw_accel_aes_ni: false,
+    cpu_architecture: "",
+    clock_speed: "",
+    clock_unit: "MHz",
+    core_count: "",
+    ram_size: "",
+    ram_unit: "MB",
+    battery_powered: null,
+    hw_accel_aes_ni: null,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -48,7 +108,8 @@ export default function NewProfilePage() {
       for (let i = 0; i < cols; i++) {
         const char = chars[Math.floor(Math.random() * chars.length)];
         ctx.fillText(char, i * fontSize, drops[i] * fontSize);
-        if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0;
+        if (drops[i] * fontSize > canvas.height && Math.random() > 0.975)
+          drops[i] = 0;
         drops[i]++;
       }
     };
@@ -60,19 +121,44 @@ export default function NewProfilePage() {
     };
   }, []);
 
-  const update = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
+  const update = (field, value) =>
+    setForm((prev) => ({ ...prev, [field]: value }));
 
   const handleSubmit = async () => {
+    if (
+      !form.cpu_architecture ||
+      !form.core_count ||
+      !form.ram_size ||
+      form.battery_powered === null
+    ) {
+      setError("Please fill in all required fields.");
+      return;
+    }
+
     setSaving(true);
     setError(null);
     try {
+      const clock_speed = normalizeClockToMHz(form.clock_speed, form.clock_unit);
+      const ram_size = normalizeRamToMB(form.ram_size, form.ram_unit);
+      const core_count = parseInt(form.core_count);
+
+      const device_tier = computeDeviceTier({
+        archOption: form.cpu_architecture,
+        clockMHz: clock_speed,
+        cores: core_count,
+        ramMB: ram_size,
+      });
+
       const payload = {
+        name: profileName,
+        detection_method: detected ? "auto" : "manual",
         cpu_architecture: form.cpu_architecture,
-        clock_speed: parseFloat(form.clock_speed),
-        core_count: parseInt(form.core_count),
-        ram_size: parseInt(form.ram_size),
+        clock_speed,
+        core_count,
+        ram_size,
         battery_powered: form.battery_powered,
-        hw_accel_aes_ni: form.hw_accel_aes_ni,
+        hw_accel_aes_ni: form.hw_accel_aes_ni === true, // null → false
+        device_tier,
       };
       await createProfile(payload);
       router.push("/profiles");
@@ -83,15 +169,51 @@ export default function NewProfilePage() {
     }
   };
 
-  const ToggleButton = ({ active, onClick, children }) => (
+  const handleAutoDetect = async () => {
+    setDetecting(true);
+    try {
+      const res = await fetch("http://127.0.0.1:8000/detect-specs");
+      const specs = await res.json();
+      const mappedArch = mapDetectedArch(specs.cpu_architecture);
+
+      setForm((prev) => ({
+        ...prev,
+        cpu_architecture: mappedArch || prev.cpu_architecture,
+        clock_speed: specs.clock_speed_mhz
+          ? String(specs.clock_speed_mhz)
+          : prev.clock_speed,
+        clock_unit: "MHz",
+        core_count: String(specs.core_count),
+        ram_size: String(specs.ram_size_mb),
+        ram_unit: "MB",
+        battery_powered: specs.battery_powered,
+        hw_accel_aes_ni: specs.hw_accel_aes_ni,
+      }));
+
+      if (mappedArch) {
+        setDetected(true);
+      } else {
+        setError(
+          `Detected architecture "${specs.cpu_architecture}" isn't in the list — please select manually.`,
+        );
+      }
+    } catch (err) {
+      setError("Auto-detect failed: " + err.message);
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const ToggleButton = ({ active, onClick, disabled, children }) => (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`flex-1 py-3 rounded-md text-sm font-semibold transition ${
         active
           ? "bg-gradient-to-b from-[#7aa3ff] to-[#4a7bef] text-[#0a0a0a]"
           : "border border-white/15 text-[#c7c7c7] hover:bg-white/5"
-      }`}
+      } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
     >
       {children}
     </button>
@@ -99,36 +221,73 @@ export default function NewProfilePage() {
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#0a0a0a] text-[#f5f5f5] font-sans">
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full opacity-[0.14] pointer-events-none" />
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 w-full h-full opacity-[0.14] pointer-events-none"
+      />
 
       {/* Header */}
       <div className="relative flex items-center justify-between px-12 pt-7">
-        <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">PRISEC-IV</div>
+        <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">
+          PRISEC-IV
+        </div>
       </div>
 
       {/* Title */}
-        <div className="relative px-12 pt-14 max-w-3xl mx-auto">
-        <h1 className="text-5xl font-bold mb-3 text-center" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
-            Create Device Profile
+      <div className="relative px-12 pt-14 max-w-3xl mx-auto">
+        <h1
+          className="text-5xl font-bold mb-3 text-center"
+          style={{ fontFamily: "'Space Grotesk', sans-serif" }}
+        >
+          Create Device Profile
         </h1>
         <p className="font-mono text-sm text-[#8a8a8a] mb-10 text-center">
-            Describe the device so the model can choose a fitting cipher.
+          Describe the device so the model can choose a fitting cipher.
         </p>
-        </div>
+      </div>
 
       {/* Form card */}
-        <div className="relative px-12 pb-16 flex justify-center">
+      <div className="relative px-12 pb-16 flex justify-center">
         <div className="max-w-3xl w-full bg-[#121212] border border-white/10 rounded-2xl p-8 shadow-2xl">
           <div className="flex items-center justify-between mb-8">
             <div className="flex items-center gap-2">
               <Shield size={18} className="text-[#5b8cff]" />
-              <span className="text-[15px] font-semibold">Device Profile</span>
+              {editingName ? (
+                <input
+                  autoFocus
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                  onBlur={() => setEditingName(false)}
+                  onKeyDown={(e) => e.key === "Enter" && setEditingName(false)}
+                  className="bg-transparent border-b border-[#5b8cff] text-[15px] font-semibold text-[#f5f5f5] focus:outline-none"
+                />
+              ) : (
+                <span className="text-[15px] font-semibold">{profileName}</span>
+              )}
+              <button
+                type="button"
+                onClick={() => setEditingName(true)}
+                className="text-[#8a8a8a] hover:text-[#5b8cff] transition"
+              >
+                <Pencil size={13} />
+              </button>
             </div>
             <button
               type="button"
-              className="text-xs font-mono text-[#8a8a8a] border border-white/15 px-3 py-1.5 rounded-md hover:bg-white/5 transition"
+              onClick={handleAutoDetect}
+              disabled={detecting || detected}
+              className={`flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md transition ${
+                detected
+                  ? "border border-[#5b8cff] text-[#5b8cff] cursor-not-allowed"
+                  : detecting
+                    ? "border border-red-500 text-red-500 cursor-not-allowed"
+                    : "border border-white/15 text-[#8a8a8a] hover:bg-white/5"
+              }`}
             >
-              Auto-Detect
+              {detecting && (
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              )}
+              {detected ? "Auto-Detected" : "Auto-Detect"}
             </button>
           </div>
 
@@ -141,26 +300,44 @@ export default function NewProfilePage() {
               <select
                 value={form.cpu_architecture}
                 onChange={(e) => update("cpu_architecture", e.target.value)}
+                disabled={detected}
                 className="w-full bg-[#0a0a0a] border border-white/15 rounded-md px-4 py-3 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#5b8cff]"
               >
+                <option value="" disabled>
+                  Select CPU architecture
+                </option>
                 {CPU_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>{opt}</option>
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
                 ))}
               </select>
             </div>
 
             {/* Clock Speed */}
             <div>
-              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">CLOCK SPEED</label>
+              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
+                CLOCK SPEED
+              </label>
               <div className="flex gap-2">
                 <input
                   type="number"
                   step="0.1"
                   value={form.clock_speed}
                   onChange={(e) => update("clock_speed", e.target.value)}
+                  disabled={detected}
                   className="flex-1 bg-[#0a0a0a] border border-white/15 rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff]"
                 />
-                <span className="flex items-center px-4 text-sm text-[#8a8a8a] border border-white/15 rounded-md">GHz</span>
+                <select
+                  value={form.clock_unit}
+                  onChange={(e) => update("clock_unit", e.target.value)}
+                  disabled={detected}
+                  className="bg-[#0a0a0a] border border-white/15 rounded-md px-3 py-3 text-sm text-[#c7c7c7] focus:outline-none focus:border-[#5b8cff]"
+                >
+                  <option value="kHz">kHz</option>
+                  <option value="MHz">MHz</option>
+                  <option value="GHz">GHz</option>
+                </select>
               </div>
             </div>
 
@@ -173,6 +350,7 @@ export default function NewProfilePage() {
                 type="number"
                 value={form.core_count}
                 onChange={(e) => update("core_count", e.target.value)}
+                disabled={detected}
                 className="w-full bg-[#0a0a0a] border border-white/15 rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff]"
               />
             </div>
@@ -187,9 +365,19 @@ export default function NewProfilePage() {
                   type="number"
                   value={form.ram_size}
                   onChange={(e) => update("ram_size", e.target.value)}
+                  disabled={detected}
                   className="flex-1 bg-[#0a0a0a] border border-white/15 rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff]"
                 />
-                <span className="flex items-center px-4 text-sm text-[#8a8a8a] border border-white/15 rounded-md">MB</span>
+                <select
+                  value={form.ram_unit}
+                  onChange={(e) => update("ram_unit", e.target.value)}
+                  disabled={detected}
+                  className="bg-[#0a0a0a] border border-white/15 rounded-md px-3 py-3 text-sm text-[#c7c7c7] focus:outline-none focus:border-[#5b8cff]"
+                >
+                  <option value="kB">kB</option>
+                  <option value="MB">MB</option>
+                  <option value="GB">GB</option>
+                </select>
               </div>
             </div>
 
@@ -199,17 +387,43 @@ export default function NewProfilePage() {
                 BATTERY-POWERED <span className="text-red-400">*</span>
               </label>
               <div className="flex gap-3">
-                <ToggleButton active={form.battery_powered} onClick={() => update("battery_powered", true)}>Yes</ToggleButton>
-                <ToggleButton active={!form.battery_powered} onClick={() => update("battery_powered", false)}>No</ToggleButton>
+                <ToggleButton
+                  active={form.battery_powered === true}
+                  onClick={() => update("battery_powered", true)}
+                  disabled={detected}
+                >
+                  Yes
+                </ToggleButton>
+                <ToggleButton
+                  active={form.battery_powered === false}
+                  onClick={() => update("battery_powered", false)}
+                  disabled={detected}
+                >
+                  No
+                </ToggleButton>
               </div>
             </div>
 
             {/* AES-NI Support */}
             <div>
-              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">AES-NI SUPPORT</label>
+              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
+                AES-NI SUPPORT
+              </label>
               <div className="flex gap-3">
-                <ToggleButton active={form.hw_accel_aes_ni} onClick={() => update("hw_accel_aes_ni", true)}>Yes</ToggleButton>
-                <ToggleButton active={!form.hw_accel_aes_ni} onClick={() => update("hw_accel_aes_ni", false)}>No</ToggleButton>
+                <ToggleButton
+                  active={form.hw_accel_aes_ni === true}
+                  onClick={() => update("hw_accel_aes_ni", true)}
+                  disabled={detected}
+                >
+                  Yes
+                </ToggleButton>
+                <ToggleButton
+                  active={form.hw_accel_aes_ni === false}
+                  onClick={() => update("hw_accel_aes_ni", false)}
+                  disabled={detected}
+                >
+                  No
+                </ToggleButton>
               </div>
             </div>
           </div>
@@ -217,7 +431,7 @@ export default function NewProfilePage() {
           <div className="border-t border-white/10 mt-8 pt-6 flex justify-between items-center">
             <button
               type="button"
-              onClick={() => router.push("/profiles")}
+              onClick={() => router.back()}
               className="px-5 py-2.5 border border-white/15 rounded-md text-sm text-[#c7c7c7] hover:bg-white/5 transition"
             >
               Cancel

@@ -16,11 +16,14 @@ class Profile(Base):
     __tablename__ = "profiles"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, default="Device Profile")
+    detection_method = Column(String(10), nullable=False, default="manual")
     cpu_architecture = Column(String(50), nullable=False)
     clock_speed = Column(Float)
     core_count = Column(Integer)
     ram_size = Column(Integer)
     battery_powered = Column(Boolean)
+    device_tier = Column(Integer)
     hw_accel_aes_ni = Column(Boolean)
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())

@@ -15,3 +15,14 @@ export async function listProfiles() {
   if (!res.ok) throw new Error("Failed to fetch profiles");
   return res.json();
 }
+
+export async function deleteProfile(id) {
+  const res = await fetch(`${API_BASE}/profiles/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete profile");
+}
+
+export async function getProfile(id) {
+  const res = await fetch(`${API_BASE}/profiles/${id}`);
+  if (!res.ok) throw new Error("Failed to fetch profile");
+  return res.json();
+}
