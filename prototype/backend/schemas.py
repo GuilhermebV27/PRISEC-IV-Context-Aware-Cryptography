@@ -8,12 +8,12 @@ class ProfileCreate(BaseModel):
     name: str
     detection_method: str = "manual"
     cpu_architecture: str
-    clock_speed: Optional[float] = None
-    core_count: Optional[int] = None
-    ram_size: Optional[int] = None
-    battery_powered: Optional[bool] = None
-    hw_accel_aes_ni: Optional[bool] = None
-    device_tier: Optional[int] = None
+    clock_speed: float | None = None
+    core_count: int | None = None
+    ram_size: int | None = None
+    battery_powered: bool | None = None
+    hw_accel_aes_ni: bool | None = None
+    device_tier: int | None = None
 
 class ProfileOut(ProfileCreate):
     id: int

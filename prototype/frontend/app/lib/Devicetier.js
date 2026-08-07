@@ -1,13 +1,3 @@
-// deviceTier.js
-//
-// Computes the device tier (T1-T6) from the four hardware specs, using the
-// strict boundary method first and falling back to the CPS weighted score
-// when the strict method can't resolve to exactly one tier.
-//
-// Call computeDeviceTier() at profile-submit time and include its result in
-// the payload sent to the backend, so device_tier is already resolved when
-// it reaches the database.
-
 export const CPU_OPTIONS = [
   "8-bit MCU (AVR/PIC/8051)",
   "16-bit MCU (MSP430/PIC24/RL78)",
