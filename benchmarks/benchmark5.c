@@ -1,40 +1,42 @@
 /*
-* benchmark5.c - PRISEC-IV Phase 5 Benchmark (AES-family: HW-accel vs software)
+* benchmark5.c - PRISEC-IV Phase 5 Benchmark (AES/ChaCha20 family, SOFTWARE-ONLY)
 *
-* Entries (7 total), each run twice — once WITH AES-NI hardware acceleration
-* and once WITHOUT it — and combined into a single CSV with an "ha" column
-* (1 = hardware accelerated, 0 = software-only):
+* This is a single-pass, hardware-acceleration-DISABLED run. The
+* hardware-accelerated numbers for these same entries already exist in
+* phase1_results.csv (single ciphers) and phase3_results.csv (cascades),
+* so this benchmark does not repeat that pass — it only produces the
+* software-path comparison point.
 *
-*   AES-128                (single cipher, benchmark1-style, no ECC)
-*   AES-192                (single cipher, benchmark1-style, no ECC)
-*   AES-256                (single cipher, benchmark1-style, no ECC)
-*   AES-128+AES-256        (cascade, benchmark3-style, no ECC)
-*   AES-128+HIGHT          (cascade, benchmark3-style, no ECC)
-*   AES-128+SPECK          (cascade, benchmark3-style, no ECC)
-*   ChaCha20+AES-256       (cascade, benchmark3-style, no ECC)
+* Entries (9 total) — every single cipher and every cascade that mentions
+* AES and/or ChaCha20:
 *
-* Hardware-acceleration toggle:
-*   OpenSSL decides at library-load time (a constructor that runs before
-*   main()) whether to use AES-NI, based on CPUID and the OPENSSL_ia32cap
-*   environment variable. That decision is baked into the process image, so
-*   flipping it requires a real execve() of a fresh process — forking alone
-*   is not enough, since a fork() inherits the already-resolved decision.
+*   Single ciphers:
+*     AES-128, AES-192, AES-256, ChaCha20
 *
-*   This binary therefore runs as a small state machine, driven by the
-*   PRISEC_HA_PASS environment variable:
+*   Cascades (layer1 -> layer2):
+*     AES-128+AES-256, AES-128+HIGHT, AES-128+SPECK,
+*     ChaCha20+AES-256, ChaCha20+SPECK
 *
-*     unset            -> orchestrator: execve's itself twice (HA=1, then
-*                          HA=0), waits for each pass to finish, then merges
-*                          the two partial CSVs into phase5_results.csv.
-*     "1"              -> hardware-accelerated worker pass: runs with the
-*                          CPU's native AES-NI capability, writes
-*                          phase5_results_ha1.csv (ha column = 1).
-*     "0"              -> software-only worker pass: execve's itself with
-*                          OPENSSL_ia32cap set to mask out AES-NI, then runs,
-*                          writes phase5_results_ha0.csv (ha column = 0).
+* Hardware-acceleration disabling:
+*   An earlier version of this benchmark only cleared the AES-NI bit in
+*   OPENSSL_ia32cap. That's insufficient: AES-NI is a dedicated AES-round
+*   instruction and has nothing to do with ChaCha20, which OpenSSL instead
+*   accelerates with SIMD (SSSE3 / AVX2 / AVX-512) vector code. Clearing
+*   only AES-NI left ChaCha20 fully accelerated even in the "no HW accel"
+*   pass. This version clears both:
 *
-*   Each worker pass still uses the same per-combo fork() + tcache-disable
-*   re-exec pattern as benchmark1/2/3/4, for accurate memory measurement.
+*     - word 0 (CPUID leaf 1, EDX:ECX): AES-NI (bit 57), PCLMULQDQ (bit 33),
+*       SSSE3 (bit 41), AVX (bit 60)
+*     - word 1 (CPUID leaf 7, EBX, offset +64): set to 0, per OpenSSL's own
+*       documented recipe for disabling "all post-AVX extensions"
+*       (AVX2, AVX512F/DQ/BW/VL, VAES, VPCLMULQDQ, etc.)
+*
+*   i.e. OPENSSL_ia32cap="~0x1200020200000000:0"
+*
+*   As with the AES-NI-only version, this decision is baked in by an
+*   OpenSSL library-load constructor that runs before main(), so a plain
+*   fork() can't change it after the fact — the environment variable must
+*   be set before a real execve() of a fresh process image.
 *
 * Build:
 *   gcc -O2 -fno-stack-protector -o benchmark5 benchmark5.c -lcrypto -lm \
@@ -216,22 +218,25 @@ static algo_t CHACHA20 = { "ChaCha20", 32, 0, 0,  wrap_chacha_enc, wrap_chacha_d
 static algo_t SPECK_   = { "SPECK",    16, 1, 16, wrap_speck_enc,  wrap_speck_dec  };
 static algo_t HIGHT_   = { "HIGHT",    16, 1, 8,  wrap_hight_enc,  wrap_hight_dec  };
 
+/* Single-cipher entries: every AES variant and ChaCha20. */
+static algo_t *SINGLE_ALGOS[] = { &AES128, &AES192, &AES256, &CHACHA20 };
+#define N_SINGLE (int)(sizeof(SINGLE_ALGOS)/sizeof(SINGLE_ALGOS[0]))
+
 typedef struct {
     const char *pair_name;
     algo_t *layer1;
     algo_t *layer2;
 } cascade_t;
 
-/* Single-cipher entries (mirrors benchmark1.c, AES family only). */
-static algo_t *SINGLE_ALGOS[] = { &AES128, &AES192, &AES256 };
-#define N_SINGLE (int)(sizeof(SINGLE_ALGOS)/sizeof(SINGLE_ALGOS[0]))
-
-/* Cascade entries (mirrors benchmark3.c, subset requested for phase 5). */
+/* Cascade entries: every benchmark3.c cascade that mentions AES and/or
+ * ChaCha20 in either layer (SPECK+HIGHT and HIGHT+RECTANGLE are excluded,
+ * since neither layer is AES or ChaCha20). */
 static cascade_t CASCADES[] = {
     { "AES-128+AES-256",  &AES128,   &AES256 },
     { "AES-128+HIGHT",    &AES128,   &HIGHT_ },
     { "AES-128+SPECK",    &AES128,   &SPECK_ },
     { "ChaCha20+AES-256", &CHACHA20, &AES256 },
+    { "ChaCha20+SPECK",   &CHACHA20, &SPECK_ },
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
 
@@ -567,40 +572,27 @@ static result_t run_combo_cascade(cascade_t *casc, size_entry_t *sz) {
 }
 
 static void write_row(FILE *csv, const char *name, const char *size_label,
-                       result_t *res, int has_block_layer, int ha) {
+                       result_t *res, int has_block_layer) {
+    /* ha is always 0 in this benchmark: every entry runs software-only. */
     if (has_block_layer) {
-        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d\n",
+        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0\n",
                 name, size_label,
                 res->enc_ms, res->dec_ms,
                 res->thr_enc_mbps, res->thr_dec_mbps,
                 res->latency_us,
                 res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb, ha);
+                res->mem_dec_peak_kb, res->mem_dec_overhead_kb);
     } else {
-        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f,%.4f,%.4f,%d\n",
+        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f,%.4f,%.4f,0\n",
                 name, size_label,
                 res->enc_ms, res->dec_ms,
                 res->thr_enc_mbps, res->thr_dec_mbps,
                 res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb, ha);
+                res->mem_dec_peak_kb, res->mem_dec_overhead_kb);
     }
 }
 
-/* Runs the full entry x size sweep for one HA pass, forking per combo
- * (like benchmark1/3) so each measurement starts from a clean heap. */
-static void run_worker_pass(const char *out_path, int ha) {
-    FILE *csv = fopen(out_path, "w");
-    if (!csv) {
-        fprintf(stderr, "Failed to open %s for writing\n", out_path);
-        exit(1);
-    }
-
-    fprintf(csv,
-        "cascade,data_size,ecc_ms,enc_ms,dec_ms,"
-        "throughput_enc_mbps,throughput_dec_mbps,"
-        "latency_us,memory_enc_peak_kb,memory_enc_overhead_kb,"
-        "memory_dec_peak_kb,memory_dec_overhead_kb,ha\n");
-
+static void run_all_combos(FILE *csv) {
     for (int a = 0; a < N_SINGLE; a++) {
         for (int s = 0; s < N_SIZES; s++) {
             int pipefd[2];
@@ -635,11 +627,11 @@ static void run_worker_pass(const char *out_path, int ha) {
                 continue;
             }
             write_row(csv, SINGLE_ALGOS[a]->name, SIZES[s].label, &res,
-                      SINGLE_ALGOS[a]->is_block_cipher, ha);
+                      SINGLE_ALGOS[a]->is_block_cipher);
             fflush(csv);
 
-            printf("[parent] [%s | %s | ha=%d] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
-                   SINGLE_ALGOS[a]->name, SIZES[s].label, ha, res.enc_ms, res.dec_ms,
+            printf("[parent] [%s | %s] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
+                   SINGLE_ALGOS[a]->name, SIZES[s].label, res.enc_ms, res.dec_ms,
                    res.mem_enc_peak_kb, res.mem_dec_peak_kb);
             fflush(stdout);
         }
@@ -679,99 +671,30 @@ static void run_worker_pass(const char *out_path, int ha) {
                 continue;
             }
             int has_block_layer = CASCADES[c].layer1->is_block_cipher || CASCADES[c].layer2->is_block_cipher;
-            write_row(csv, CASCADES[c].pair_name, SIZES[s].label, &res, has_block_layer, ha);
+            write_row(csv, CASCADES[c].pair_name, SIZES[s].label, &res, has_block_layer);
             fflush(csv);
 
-            printf("[parent] [%s | %s | ha=%d] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
-                   CASCADES[c].pair_name, SIZES[s].label, ha, res.enc_ms, res.dec_ms,
+            printf("[parent] [%s | %s] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
+                   CASCADES[c].pair_name, SIZES[s].label, res.enc_ms, res.dec_ms,
                    res.mem_enc_peak_kb, res.mem_dec_peak_kb);
             fflush(stdout);
         }
     }
-
-    fclose(csv);
-}
-
-/* Appends the data rows (skipping the header) of `src` into `dst`. */
-static int append_body(FILE *dst, const char *src_path) {
-    FILE *src = fopen(src_path, "r");
-    if (!src) {
-        fprintf(stderr, "Failed to open %s for merging\n", src_path);
-        return 0;
-    }
-    char line[4096];
-    int first = 1;
-    while (fgets(line, sizeof(line), src)) {
-        if (first) { first = 0; continue; } /* skip header */
-        fputs(line, dst);
-    }
-    fclose(src);
-    return 1;
 }
 
 int main(int argc, char **argv) {
-    const char *ha_pass = getenv("PRISEC_HA_PASS");
-
-    if (ha_pass == NULL) {
-        /* Orchestrator: run the HW-accelerated pass first, then the
-         * software-only pass, then merge both partial CSVs. */
-        pid_t pid1 = fork();
-        if (pid1 < 0) { perror("fork (ha=1)"); return 1; }
-        if (pid1 == 0) {
-            setenv("PRISEC_HA_PASS", "1", 1);
-            unsetenv("OPENSSL_ia32cap");
-            unsetenv("PRISEC_TCACHE_DISABLED");
-            execv(argv[0], argv);
-            perror("execv failed for HA=1 pass");
-            _exit(1);
-        }
-        int status1;
-        waitpid(pid1, &status1, 0);
-
-        pid_t pid2 = fork();
-        if (pid2 < 0) { perror("fork (ha=0)"); return 1; }
-        if (pid2 == 0) {
-            setenv("PRISEC_HA_PASS", "0", 1);
-            /* Mask out the AES-NI bit (CPUID leaf 1, ECX bit 25 -> ia32cap
-             * bit 57) so OpenSSL falls back to its software AES path. */
-            setenv("OPENSSL_ia32cap", "~0x200000200000000", 1);
-            unsetenv("PRISEC_TCACHE_DISABLED");
-            execv(argv[0], argv);
-            perror("execv failed for HA=0 pass");
-            _exit(1);
-        }
-        int status2;
-        waitpid(pid2, &status2, 0);
-
-        FILE *out = fopen("phase5_results.csv", "w");
-        if (!out) {
-            fprintf(stderr, "Failed to open phase5_results.csv for writing\n");
-            return 1;
-        }
-        fprintf(out,
-            "cascade,data_size,ecc_ms,enc_ms,dec_ms,"
-            "throughput_enc_mbps,throughput_dec_mbps,"
-            "latency_us,memory_enc_peak_kb,memory_enc_overhead_kb,"
-            "memory_dec_peak_kb,memory_dec_overhead_kb,ha\n");
-
-        int ok1 = append_body(out, "phase5_results_ha1.csv");
-        int ok2 = append_body(out, "phase5_results_ha0.csv");
-        fclose(out);
-
-        if (ok1) remove("phase5_results_ha1.csv");
-        if (ok2) remove("phase5_results_ha0.csv");
-
-        if (!ok1 || !ok2) {
-            fprintf(stderr, "Merge incomplete; check phase5_results_ha1.csv / phase5_results_ha0.csv\n");
-            return 1;
-        }
-
-        printf("Done. Combined results written to phase5_results.csv\n");
-        return 0;
+    /* Step 1: force OPENSSL_ia32cap to disable AES-NI, PCLMULQDQ, SSSE3,
+     * AVX (word 0) and everything AVX2-and-newer (word 1), then re-exec
+     * a fresh process so OpenSSL's library-load capability detection
+     * picks it up. Without a real execve, the already-resolved capability
+     * decision from before main() would survive a plain fork(). */
+    if (!getenv("PRISEC_HA_DISABLED")) {
+        setenv("OPENSSL_ia32cap", "~0x1200020200000000:0", 1);
+        setenv("PRISEC_HA_DISABLED", "1", 1);
+        execv(argv[0], argv);
+        perror("execv failed to disable hardware acceleration");
+        return 1;
     }
-
-    /* Worker pass (ha_pass == "1" or "0"). */
-    int ha = (strcmp(ha_pass, "1") == 0) ? 1 : 0;
 
     if (!mt_install_openssl()) {
         fprintf(stderr, "CRYPTO_set_mem_functions failed; OpenSSL memory would not be tracked\n");
@@ -790,11 +713,23 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_MAX, 0);
     mallopt(M_TRIM_THRESHOLD, -1);
 
-    const char *out_path = ha ? "phase5_results_ha1.csv" : "phase5_results_ha0.csv";
-    printf("=== Phase 5 worker pass: ha=%d -> %s ===\n", ha, out_path);
+    FILE *csv = fopen("phase5_results.csv", "w");
+    if (!csv) {
+        fprintf(stderr, "Failed to open phase5_results.csv for writing\n");
+        return 1;
+    }
+    fprintf(csv,
+        "cascade,data_size,ecc_ms,enc_ms,dec_ms,"
+        "throughput_enc_mbps,throughput_dec_mbps,"
+        "latency_us,memory_enc_peak_kb,memory_enc_overhead_kb,"
+        "memory_dec_peak_kb,memory_dec_overhead_kb,ha\n");
+
+    printf("=== Phase 5 (software-only, no AES-NI/SSSE3/AVX2/AVX512) ===\n");
     fflush(stdout);
 
-    run_worker_pass(out_path, ha);
+    run_all_combos(csv);
 
+    fclose(csv);
+    printf("Done. Results written to phase5_results.csv (all rows ha=0)\n");
     return 0;
 }
