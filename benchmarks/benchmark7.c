@@ -158,7 +158,7 @@ algo_t *layer2;
 } cascade_t;
 
 static cascade_t CASCADES[] = {
-{ "HIGHT+RECTANGLE-AVX2", &HIGHT_, &RECTANGLE_AVX2 },
+{ "RECTANGLE-AVX2+HIGHT", &RECTANGLE_AVX2, &HIGHT_ },
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
 

@@ -1,6 +1,5 @@
 import platform
 
-import cpuinfo
 import models
 import psutil
 import schemas
@@ -9,6 +8,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from hw_detect import detect_hw_aes, detect_simd, best_simd_tier
 
 Base.metadata.create_all(bind=engine)
 
@@ -64,14 +65,20 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db)):
 
 @app.get("/detect-specs")
 def detect_specs():
-    info = cpuinfo.get_cpu_info()
-    flags = info.get("flags", [])
+    freq = psutil.cpu_freq()
+    clock_speed_mhz = None
+    if freq:
+        clock_speed_mhz = freq.max if freq.max else freq.current
+
+    simd = detect_simd()
 
     return {
-        "cpu_architecture": platform.machine(),  # e.g. 'x86_64', 'AMD64', 'aarch64'
-        "clock_speed_mhz": info.get("hz_advertised", [None])[0] / 1_000_000 if info.get("hz_advertised") else None,
+        "cpu_architecture": platform.machine(),
+        "clock_speed_mhz": clock_speed_mhz,
         "core_count": psutil.cpu_count(logical=True),
         "ram_size_mb": round(psutil.virtual_memory().total / (1024 * 1024)),
         "battery_powered": psutil.sensors_battery() is not None,
-        "hw_accel_aes_ni": "aes" in flags,
+        "hw_accel_aes_ni": detect_hw_aes(),
+        "hw_accel_simd_presence": any(simd.values()),
+        "hw_accel_simd_best_tier": best_simd_tier(simd),
     }

@@ -3,17 +3,16 @@ export const CPU_OPTIONS = [
   "16-bit MCU (MSP430/PIC24/RL78)",
   "ARM Cortex-M0",
   "ARM Cortex-M4",
+  "ARM Cortex-R",
   "RISC-V RV32",
   "Xtensa",
-  "ARM Cortex-R",
   "x86",
   "ARM Cortex-A (32-bit)",
-  "ARM Cortex-A (64-bit)",
   "RISC-V RV64",
-  "x86_64",
   "PowerPC (32-bit)",
+  "x86_64",
+  "ARM Cortex-A (64-bit)",
   "PowerPC (64-bit)",
-  "ARM64",
   "MIPS64",
 ];
 
@@ -32,7 +31,6 @@ export const ARCH_WIDTH_SCORE = {
   "x86_64":                          { width: 64, score: 5.5 },
   "PowerPC (32-bit)":                { width: 32, score: 3.5 },
   "PowerPC (64-bit)":                { width: 64, score: 5.5 },
-  "ARM64":                           { width: 64, score: 5.5 },
   "MIPS64":                          { width: 64, score: 5.5 },
 };
 

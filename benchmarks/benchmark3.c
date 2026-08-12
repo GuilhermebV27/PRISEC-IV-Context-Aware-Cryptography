@@ -222,13 +222,13 @@ algo_t *layer2;
 } cascade_t;
 
 static cascade_t CASCADES[] = {
-{ "AES-128+AES-256", &AES128, &AES256 },
-{ "AES-128+HIGHT", &AES128, &HIGHT_ },
-{ "AES-128+SPECK", &AES128, &SPECK_ },
-{ "ChaCha20+AES-256", &CHACHA20, &AES256 },
-{ "ChaCha20+SPECK", &CHACHA20, &SPECK_ },
-{ "SPECK+HIGHT", &SPECK_, &HIGHT_ },
-{ "HIGHT+RECTANGLE", &HIGHT_, &RECTANGLE_ },
+    { "AES-256+AES-128", &AES256, &AES128 },
+    { "AES-128+HIGHT", &AES128, &HIGHT_ },
+    { "AES-128+SPECK", &AES128, &SPECK_ },
+    { "AES-256+ChaCha20", &AES256, &CHACHA20 },
+    { "ChaCha20+SPECK", &CHACHA20, &SPECK_ },
+    { "SPECK+HIGHT", &SPECK_, &HIGHT_ },
+    { "RECTANGLE+HIGHT", &RECTANGLE_, &HIGHT_ },
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
 

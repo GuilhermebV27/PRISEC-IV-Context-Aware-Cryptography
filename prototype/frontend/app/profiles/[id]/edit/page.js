@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Shield, Pencil, Check } from "lucide-react";
-import { createProfile } from "../../lib/api";
-import { computeDeviceTier, CPU_OPTIONS } from "../../lib/Devicetier";
+import { useParams, useRouter } from "next/navigation";
+import { Shield, Pencil } from "lucide-react";
+import { getProfile, updateProfile } from "../../../lib/api";
+import { computeDeviceTier, CPU_OPTIONS } from "../../../lib/Devicetier";
 
 const SIMD_TIER_OPTIONS = ["avx512", "avx2", "sve", "ssse3", "neon", "scalar"];
 
@@ -44,18 +44,21 @@ const EMPTY_ISSUES = {
   clock_speed: false,
   core_count: false,
   ram_size: false,
-  battery_powered: false,
 };
 
-export default function NewProfilePage() {
+export default function EditProfilePage() {
+  const { id } = useParams();
   const router = useRouter();
   const canvasRef = useRef(null);
 
-  const [profileName, setProfileName] = useState("Device Profile");
+  const [loadingProfile, setLoadingProfile] = useState(true);
+  const [originalDetectionMethod, setOriginalDetectionMethod] = useState("manual");
+
+  const [profileName, setProfileName] = useState("");
   const [editingName, setEditingName] = useState(false);
-  const [detected, setDetected] = useState(false);
+  const [detected, setDetected] = useState(false); // re-detected THIS session
   const [detecting, setDetecting] = useState(false);
-  const [fieldIssues, setFieldIssues] = useState(EMPTY_ISSUES);
+  const [detectionIssues, setDetectionIssues] = useState(EMPTY_ISSUES);
 
   const [form, setForm] = useState({
     cpu_architecture: "",
@@ -72,9 +75,36 @@ export default function NewProfilePage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  // Matrix background (same as landing page)
+  // Was this profile originally created via auto-detect? If so, the three
+  // boolean fields stay locked unless the user re-runs Auto-Detect now.
+  const isAutoLocked = originalDetectionMethod === "auto" && !detected;
+
+  // Load existing profile
+  useEffect(() => {
+    getProfile(id)
+      .then((p) => {
+        setProfileName(p.name);
+        setOriginalDetectionMethod(p.detection_method || "manual");
+        setForm({
+          cpu_architecture: p.cpu_architecture || "",
+          clock_speed: p.clock_speed != null ? String(p.clock_speed) : "",
+          clock_unit: "MHz",
+          core_count: p.core_count != null ? String(p.core_count) : "",
+          ram_size: p.ram_size != null ? String(p.ram_size) : "",
+          ram_unit: "MB",
+          battery_powered: p.battery_powered,
+          hw_accel_aes_ni: p.hw_accel_aes_ni,
+          hw_accel_simd_presence: p.hw_accel_simd_presence,
+          hw_accel_simd_best_tier: p.hw_accel_simd_best_tier || "",
+        });
+      })
+      .finally(() => setLoadingProfile(false));
+  }, [id]);
+
+  // Matrix background
   useEffect(() => {
     const canvas = canvasRef.current;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
     const container = canvas.parentElement;
     const chars = "01ABCDEF";
@@ -98,8 +128,7 @@ export default function NewProfilePage() {
       for (let i = 0; i < cols; i++) {
         const char = chars[Math.floor(Math.random() * chars.length)];
         ctx.fillText(char, i * fontSize, drops[i] * fontSize);
-        if (drops[i] * fontSize > canvas.height && Math.random() > 0.975)
-          drops[i] = 0;
+        if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0;
         drops[i]++;
       }
     };
@@ -109,69 +138,11 @@ export default function NewProfilePage() {
       clearInterval(interval);
       window.removeEventListener("resize", resize);
     };
-  }, []);
+  }, [loadingProfile]);
 
-  const update = (field, value) =>
-    setForm((prev) => ({ ...prev, [field]: value }));
+  const update = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
 
-  const clearIssue = (field) => setFieldIssues((d) => ({ ...d, [field]: false }));
-
-  const handleSubmit = async () => {
-    const missing = {
-      cpu_architecture: !form.cpu_architecture,
-      core_count: !form.core_count,
-      ram_size: !form.ram_size,
-      battery_powered: form.battery_powered === null,
-    };
-    const hasMissing = Object.values(missing).some(Boolean);
-    if (hasMissing) {
-      setFieldIssues((prev) => ({ ...prev, ...missing }));
-      return;
-    }
-
-    setSaving(true);
-    setError(null);
-    try {
-      const clock_speed = normalizeClockToMHz(form.clock_speed, form.clock_unit);
-      const ram_size = normalizeRamToMB(form.ram_size, form.ram_unit);
-      const core_count = parseInt(form.core_count);
-
-      const device_tier = computeDeviceTier({
-        archOption: form.cpu_architecture,
-        clockMHz: clock_speed,
-        cores: core_count,
-        ramMB: ram_size,
-      });
-
-      // AES-NI / SIMD Presence: use whatever the user picked; if still
-      // untouched (null), default based on the tier just computed.
-      const tierDefaultBool = device_tier >= 4;
-      const hw_accel_aes_ni =
-        form.hw_accel_aes_ni === null ? tierDefaultBool : form.hw_accel_aes_ni === true;
-      const hw_accel_simd_presence =
-        form.hw_accel_simd_presence === null ? tierDefaultBool : form.hw_accel_simd_presence === true;
-
-      const payload = {
-        name: profileName,
-        detection_method: detected ? "auto" : "manual",
-        cpu_architecture: form.cpu_architecture,
-        clock_speed,
-        core_count,
-        ram_size,
-        battery_powered: form.battery_powered,
-        hw_accel_aes_ni,
-        hw_accel_simd_presence,
-        hw_accel_simd_best_tier: hw_accel_simd_presence ? form.hw_accel_simd_best_tier : "scalar",
-        device_tier,
-      };
-      await createProfile(payload);
-      router.push("/profiles");
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
-    }
-  };
+  const clearIssue = (field) => setDetectionIssues((d) => ({ ...d, [field]: false }));
 
   const handleAutoDetect = async () => {
     setDetecting(true);
@@ -200,13 +171,12 @@ export default function NewProfilePage() {
       }));
 
       setDetected(true);
-      setFieldIssues((prev) => ({
-        ...prev,
+      setDetectionIssues({
         cpu_architecture: !mappedArch,
         clock_speed: !clockDetected,
         core_count: !coreDetected,
         ram_size: !ramDetected,
-      }));
+      });
 
       const missing = [];
       if (!mappedArch) missing.push(`architecture ("${specs.cpu_architecture}" not recognized)`);
@@ -225,6 +195,54 @@ export default function NewProfilePage() {
     }
   };
 
+  const handleSubmit = async () => {
+    if (
+      !form.cpu_architecture ||
+      !form.core_count ||
+      !form.ram_size ||
+      form.battery_powered === null
+    ) {
+      setError("Please fill in all required fields.");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+    try {
+      const clock_speed = normalizeClockToMHz(form.clock_speed, form.clock_unit);
+      const ram_size = normalizeRamToMB(form.ram_size, form.ram_unit);
+      const core_count = parseInt(form.core_count);
+
+      const device_tier = computeDeviceTier({
+        archOption: form.cpu_architecture,
+        clockMHz: clock_speed,
+        cores: core_count,
+        ramMB: ram_size,
+      });
+
+      const payload = {
+        name: profileName,
+        detection_method: detected ? "auto" : originalDetectionMethod,
+        cpu_architecture: form.cpu_architecture,
+        clock_speed,
+        core_count,
+        ram_size,
+        battery_powered: form.battery_powered,
+        hw_accel_aes_ni: form.hw_accel_aes_ni === true,
+        hw_accel_simd_presence: form.hw_accel_simd_presence === true,
+        hw_accel_simd_best_tier:
+          form.hw_accel_simd_presence === true ? form.hw_accel_simd_best_tier : "scalar",
+        device_tier,
+      };
+      await updateProfile(id, payload);
+      router.push("/profiles");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const ToggleButton = ({ active, onClick, disabled, children }) => (
     <button
       type="button"
@@ -240,30 +258,30 @@ export default function NewProfilePage() {
     </button>
   );
 
+  if (loadingProfile) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] text-[#f5f5f5] flex items-center justify-center font-mono text-sm text-[#8a8a8a]">
+        Loading profile...
+      </div>
+    );
+  }
+
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#0a0a0a] text-[#f5f5f5] font-sans">
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 w-full h-full opacity-[0.14] pointer-events-none"
-      />
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full opacity-[0.14] pointer-events-none" />
 
       {/* Header */}
       <div className="relative flex items-center justify-between px-12 pt-7">
-        <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">
-          PRISEC-IV
-        </div>
+        <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">PRISEC-IV</div>
       </div>
 
       {/* Title */}
       <div className="relative px-12 pt-14 max-w-3xl mx-auto">
-        <h1
-          className="text-5xl font-bold mb-3 text-center"
-          style={{ fontFamily: "'Space Grotesk', sans-serif" }}
-        >
-          Create Device Profile
+        <h1 className="text-5xl font-bold mb-3 text-center" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+          Edit Device Profile
         </h1>
         <p className="font-mono text-sm text-[#8a8a8a] mb-10 text-center">
-          Describe the device so the model can choose a fitting cipher.
+          Update the device specs used by the decision model.
         </p>
       </div>
 
@@ -305,12 +323,17 @@ export default function NewProfilePage() {
                     : "border border-white/15 text-[#8a8a8a] hover:bg-white/5"
               }`}
             >
-              {detecting && (
-                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              )}
+              {detecting && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />}
               {detected ? "Auto-Detected" : "Auto-Detect"}
             </button>
           </div>
+
+          {isAutoLocked && (
+            <p className="text-xs font-mono text-[#8a8a8a] mb-6 -mt-4">
+              This profile was auto-detected — Battery-powered, AES-NI, and SIMD Presence are locked.
+              Re-run Auto-Detect above to override them, or edit the remaining fields freely.
+            </p>
+          )}
 
           <div className="grid grid-cols-2 gap-x-10 gap-y-6">
             {/* CPU Architecture */}
@@ -325,25 +348,22 @@ export default function NewProfilePage() {
                   clearIssue("cpu_architecture");
                 }}
                 className={`w-full bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#5b8cff] ${
-                  fieldIssues.cpu_architecture ? "border-red-500" : "border-white/15"
+                  detectionIssues.cpu_architecture ? "border-red-500" : "border-white/15"
                 }`}
               >
-                <option value="" disabled>
-                  Select CPU architecture
-                </option>
+                <option value="" disabled>Select CPU architecture</option>
                 {CPU_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt}
-                  </option>
+                  <option key={opt} value={opt}>{opt}</option>
                 ))}
               </select>
+              {detectionIssues.cpu_architecture && (
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please select manually.</p>
+              )}
             </div>
 
             {/* Clock Speed */}
             <div>
-              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
-                CLOCK SPEED
-              </label>
+              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">CLOCK SPEED</label>
               <div className="flex gap-2">
                 <input
                   type="number"
@@ -354,7 +374,7 @@ export default function NewProfilePage() {
                     clearIssue("clock_speed");
                   }}
                   className={`flex-1 bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff] ${
-                    fieldIssues.clock_speed ? "border-red-500" : "border-white/15"
+                    detectionIssues.clock_speed ? "border-red-500" : "border-white/15"
                   }`}
                 />
                 <select
@@ -367,6 +387,9 @@ export default function NewProfilePage() {
                   <option value="GHz">GHz</option>
                 </select>
               </div>
+              {detectionIssues.clock_speed && (
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please enter manually.</p>
+              )}
             </div>
 
             {/* Core Count */}
@@ -382,9 +405,12 @@ export default function NewProfilePage() {
                   clearIssue("core_count");
                 }}
                 className={`w-full bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff] ${
-                  fieldIssues.core_count ? "border-red-500" : "border-white/15"
+                  detectionIssues.core_count ? "border-red-500" : "border-white/15"
                 }`}
               />
+              {detectionIssues.core_count && (
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please enter manually.</p>
+              )}
             </div>
 
             {/* RAM Capacity */}
@@ -401,7 +427,7 @@ export default function NewProfilePage() {
                     clearIssue("ram_size");
                   }}
                   className={`flex-1 bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff] ${
-                    fieldIssues.ram_size ? "border-red-500" : "border-white/15"
+                    detectionIssues.ram_size ? "border-red-500" : "border-white/15"
                   }`}
                 />
                 <select
@@ -414,6 +440,9 @@ export default function NewProfilePage() {
                   <option value="GB">GB</option>
                 </select>
               </div>
+              {detectionIssues.ram_size && (
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please enter manually.</p>
+              )}
             </div>
 
             {/* Battery-powered */}
@@ -421,26 +450,18 @@ export default function NewProfilePage() {
               <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
                 BATTERY-POWERED <span className="text-red-400">*</span>
               </label>
-              <div
-                className={`flex gap-3 ${fieldIssues.battery_powered ? "border border-red-500 rounded-md p-1" : ""}`}
-              >
+              <div className="flex gap-3">
                 <ToggleButton
                   active={form.battery_powered === true}
-                  onClick={() => {
-                    update("battery_powered", true);
-                    clearIssue("battery_powered");
-                  }}
-                  disabled={detected}
+                  onClick={() => update("battery_powered", true)}
+                  disabled={isAutoLocked}
                 >
                   Yes
                 </ToggleButton>
                 <ToggleButton
                   active={form.battery_powered === false}
-                  onClick={() => {
-                    update("battery_powered", false);
-                    clearIssue("battery_powered");
-                  }}
-                  disabled={detected}
+                  onClick={() => update("battery_powered", false)}
+                  disabled={isAutoLocked}
                 >
                   No
                 </ToggleButton>
@@ -449,21 +470,19 @@ export default function NewProfilePage() {
 
             {/* AES-NI Support */}
             <div>
-              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
-                AES-NI SUPPORT
-              </label>
+              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">AES-NI SUPPORT</label>
               <div className="flex gap-3">
                 <ToggleButton
                   active={form.hw_accel_aes_ni === true}
                   onClick={() => update("hw_accel_aes_ni", true)}
-                  disabled={detected}
+                  disabled={isAutoLocked}
                 >
                   Yes
                 </ToggleButton>
                 <ToggleButton
                   active={form.hw_accel_aes_ni === false}
                   onClick={() => update("hw_accel_aes_ni", false)}
-                  disabled={detected}
+                  disabled={isAutoLocked}
                 >
                   No
                 </ToggleButton>
@@ -472,21 +491,19 @@ export default function NewProfilePage() {
 
             {/* SIMD Presence */}
             <div>
-              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
-                SIMD PRESENCE
-              </label>
+              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">SIMD PRESENCE</label>
               <div className="flex gap-3">
                 <ToggleButton
                   active={form.hw_accel_simd_presence === true}
                   onClick={() => update("hw_accel_simd_presence", true)}
-                  disabled={detected}
+                  disabled={isAutoLocked}
                 >
                   Yes
                 </ToggleButton>
                 <ToggleButton
                   active={form.hw_accel_simd_presence === false}
                   onClick={() => update("hw_accel_simd_presence", false)}
-                  disabled={detected}
+                  disabled={isAutoLocked}
                 >
                   No
                 </ToggleButton>
@@ -495,22 +512,16 @@ export default function NewProfilePage() {
 
             {/* SIMD Tier */}
             <div>
-              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
-                HIGHEST SIMD TIER
-              </label>
+              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">HIGHEST SIMD TIER</label>
               <select
                 value={form.hw_accel_simd_best_tier}
                 onChange={(e) => update("hw_accel_simd_best_tier", e.target.value)}
-                disabled={detected || form.hw_accel_simd_presence !== true}
+                disabled={form.hw_accel_simd_presence !== true}
                 className="w-full bg-[#0a0a0a] border border-white/15 rounded-md px-4 py-3 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#5b8cff] disabled:opacity-40"
               >
-                <option value="" disabled>
-                  Select highest SIMD tier
-                </option>
+                <option value="" disabled>Select highest SIMD tier</option>
                 {SIMD_TIER_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt.toUpperCase()}
-                  </option>
+                  <option key={opt} value={opt}>{opt.toUpperCase()}</option>
                 ))}
               </select>
             </div>
@@ -530,7 +541,7 @@ export default function NewProfilePage() {
               disabled={saving}
               className="px-6 py-2.5 rounded-md text-sm font-semibold text-[#0a0a0a] bg-gradient-to-b from-[#7aa3ff] to-[#4a7bef] shadow hover:shadow-lg transition disabled:opacity-50"
             >
-              {saving ? "Saving..." : "Save Profile"}
+              {saving ? "Updating..." : "Update Profile"}
             </button>
           </div>
 

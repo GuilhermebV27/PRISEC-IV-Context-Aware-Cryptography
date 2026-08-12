@@ -25,6 +25,8 @@ class Profile(Base):
     battery_powered = Column(Boolean)
     device_tier = Column(Integer)
     hw_accel_aes_ni = Column(Boolean)
+    hw_accel_simd_presence = Column(Boolean)          # NEW
+    hw_accel_simd_best_tier = Column(String(10))
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 

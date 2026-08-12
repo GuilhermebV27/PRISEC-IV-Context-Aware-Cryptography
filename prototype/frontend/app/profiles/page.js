@@ -191,6 +191,18 @@ export default function ProfilesPage() {
                     <span className="text-[#8a8a8a]">AES-NI Support</span>
                     <span>{p.hw_accel_aes_ni ? "Yes" : "No"}</span>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#8a8a8a]">SIMD Support</span>
+                    <span>{p.hw_accel_simd_presence ? "Yes" : "No"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#8a8a8a]">SIMD Tier</span>
+                    <span>
+                      {p.hw_accel_simd_presence
+                        ? (p.hw_accel_simd_best_tier || "—").toUpperCase()
+                        : "—"}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="border-t border-transparent group-hover:border-white/10 mt-4 pt-3 flex items-center justify-between gap-2 transition-colors duration-200">

@@ -58,3 +58,4 @@ typing_extensions==4.16.0
 tzdata==2026.2
 uvicorn==0.52.0
 wcwidth==0.8.2
+py-cpuinfo==9.0.0
