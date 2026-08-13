@@ -3,28 +3,34 @@
 *
 * Measures pure "setup time" — key schedule / cipher-context initialization,
 * with no encryption or decryption involved — for every single cipher and
-* every non-ECC cascade already used in benchmark1.c / benchmark3.c:
+* every non-ECC cascade already used in benchmark1.c / benchmark3.c, plus
+* the new three-layer cascade from benchmark8.c:
 *
-*   Single ciphers:
-*     AES-128, AES-192, AES-256, ChaCha20, SPECK, RECTANGLE, HIGHT
+* Single ciphers:
+*   AES-128, AES-192, AES-256, ChaCha20, SPECK, RECTANGLE, HIGHT
 *
-*   Cascades (layer1 -> layer2):
-*     AES-128+AES-256, AES-128+HIGHT, AES-128+SPECK, ChaCha20+AES-256,
-*     ChaCha20+SPECK, SPECK+HIGHT, HIGHT+RECTANGLE
+* Cascades (layer1+layer2, named Stronger+Weaker):
+*   AES-256+AES-128, AES-128+HIGHT, AES-128+SPECK, AES-256+ChaCha20,
+*   ChaCha20+SPECK, SPECK+HIGHT, RECTANGLE+HIGHT
+*
+* Three-layer cascade (layer1+layer2+layer3):
+*   AES-256+ChaCha20+AES-128
 *
 * "Setup" is defined per algorithm as the work needed before the first byte
 * can be encrypted:
-*   - AES / ChaCha20 (OpenSSL EVP)  -> EVP_CIPHER_CTX_new() + the two
-*                                      EVP_*Init_ex() calls that load the key
-*                                      (IV-length/tag ctrl included for AES).
-*                                      EVP_CIPHER_CTX_free() runs *after* the
-*                                      timer stops — teardown isn't setup.
+*   - AES / ChaCha20 (OpenSSL EVP) -> EVP_CIPHER_CTX_new() + the two
+*                                     EVP_*Init_ex() calls that load the key
+*                                     (IV-length/tag ctrl included for AES).
+*                                     EVP_CIPHER_CTX_free() runs *after* the
+*                                     timer stops — teardown isn't setup.
 *   - SPECK / HIGHT / RECTANGLE     -> their key-schedule expansion routine
-*                                      (software round-key derivation).
+*                                     (software round-key derivation).
 *   - Cascades                      -> layer1's setup immediately followed
-*                                      by layer2's setup, timed as one span
-*                                      (mirrors how benchmark3.c times a
-*                                      cascade's enc/dec as a single region).
+*                                     by layer2's setup (and layer3's, for
+*                                     the triple cascade), timed as one span
+*                                     (mirrors how benchmark3.c/benchmark8.c
+*                                     time a cascade's enc/dec as a single
+*                                     region).
 *
 * For each entry, setup is measured 1000 times with a fresh random key per
 * iteration (so the compiler can't hoist/cache the key schedule), and the
@@ -63,6 +69,7 @@ static int cmp_double(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
     return (da > db) - (da < db);
 }
+
 static double median(double *arr, int n) {
     qsort(arr, n, sizeof(double), cmp_double);
     if (n % 2 == 1) return arr[n / 2];
@@ -88,6 +95,7 @@ static void setup_aes(const uint8_t *key, int key_len) {
         case 32: cipher = EVP_aes_256_ccm(); break;
         default: return;
     }
+
     uint8_t nonce[AES_NONCE_SIZE] = {0};
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -146,13 +154,13 @@ typedef struct {
     setup_fn setup;
 } algo_t;
 
-static algo_t AES128     = { "AES-128",   16, setup_aes };
-static algo_t AES192     = { "AES-192",   24, setup_aes };
-static algo_t AES256     = { "AES-256",   32, setup_aes };
-static algo_t CHACHA20   = { "ChaCha20",  32, setup_chacha20 };
-static algo_t SPECK_     = { "SPECK",     16, setup_speck };
+static algo_t AES128 = { "AES-128", 16, setup_aes };
+static algo_t AES192 = { "AES-192", 24, setup_aes };
+static algo_t AES256 = { "AES-256", 32, setup_aes };
+static algo_t CHACHA20 = { "ChaCha20", 32, setup_chacha20 };
+static algo_t SPECK_ = { "SPECK", 16, setup_speck };
 static algo_t RECTANGLE_ = { "RECTANGLE", 16, setup_rectangle };
-static algo_t HIGHT_     = { "HIGHT",     16, setup_hight };
+static algo_t HIGHT_ = { "HIGHT", 16, setup_hight };
 
 static algo_t *SINGLE_ALGOS[] = { &AES128, &AES192, &AES256, &CHACHA20, &SPECK_, &RECTANGLE_, &HIGHT_ };
 #define N_SINGLE (int)(sizeof(SINGLE_ALGOS)/sizeof(SINGLE_ALGOS[0]))
@@ -163,6 +171,8 @@ typedef struct {
     algo_t *layer2;
 } cascade_t;
 
+/* Named Stronger+Weaker throughout, matching benchmark3/4/5.c and the
+ * shell scripts' CIPHER_NAMES maps. */
 static cascade_t CASCADES[] = {
     { "AES-256+AES-128", &AES256, &AES128 },
     { "AES-128+HIGHT", &AES128, &HIGHT_ },
@@ -173,6 +183,20 @@ static cascade_t CASCADES[] = {
     { "RECTANGLE+HIGHT", &RECTANGLE_, &HIGHT_ },
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
+
+/* Three-layer cascade, same Stronger+Weaker naming convention, added to
+ * match benchmark8.c's new AES-256->ChaCha20->AES-128 cascade. */
+typedef struct {
+    const char *triple_name;
+    algo_t *layer1;
+    algo_t *layer2;
+    algo_t *layer3;
+} cascade3_t;
+
+static cascade3_t CASCADES3[] = {
+    { "AES-256+ChaCha20+AES-128", &AES256, &CHACHA20, &AES128 },
+};
+#define N_CASCADES3 (int)(sizeof(CASCADES3)/sizeof(CASCADES3[0]))
 
 static double run_single_setup(algo_t *algo) {
     double times[N_RUNS];
@@ -212,6 +236,30 @@ static double run_cascade_setup(cascade_t *casc) {
     return median(times, N_RUNS);
 }
 
+static double run_cascade3_setup(cascade3_t *casc) {
+    double times[N_RUNS];
+    uint8_t key1[32], key2[32], key3[32];
+    algo_t *L1 = casc->layer1;
+    algo_t *L2 = casc->layer2;
+    algo_t *L3 = casc->layer3;
+
+    for (int i = 0; i < N_RUNS; i++) {
+        fill_random(key1, L1->key_len_bytes);
+        fill_random(key2, L2->key_len_bytes);
+        fill_random(key3, L3->key_len_bytes);
+
+        double t0 = now_us();
+        L1->setup(key1, L1->key_len_bytes);
+        L2->setup(key2, L2->key_len_bytes);
+        L3->setup(key3, L3->key_len_bytes);
+        double t1 = now_us();
+
+        times[i] = t1 - t0;
+    }
+
+    return median(times, N_RUNS);
+}
+
 int main(void) {
     srand((unsigned)time(NULL) ^ (unsigned)getpid());
 
@@ -220,6 +268,7 @@ int main(void) {
         fprintf(stderr, "Failed to open phase6_results.csv for writing\n");
         return 1;
     }
+
     fprintf(csv, "cipher,setup_us\n");
 
     for (int a = 0; a < N_SINGLE; a++) {
@@ -237,6 +286,15 @@ int main(void) {
         fflush(csv);
         printf("[%s] setup (median of %d runs) = %.4f us\n",
                CASCADES[c].pair_name, N_RUNS, setup_us);
+        fflush(stdout);
+    }
+
+    for (int c = 0; c < N_CASCADES3; c++) {
+        double setup_us = run_cascade3_setup(&CASCADES3[c]);
+        fprintf(csv, "%s,%.4f\n", CASCADES3[c].triple_name, setup_us);
+        fflush(csv);
+        printf("[%s] setup (median of %d runs) = %.4f us\n",
+               CASCADES3[c].triple_name, N_RUNS, setup_us);
         fflush(stdout);
     }
 

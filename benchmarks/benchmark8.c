@@ -1,35 +1,52 @@
 /*
-* benchmark8.c - PRISEC-IV Phase 8 Benchmark (AES-256+ChaCha20+AES-128 triple
-* cascade, with and without ECC handshake, with and without hardware
-* acceleration)
+* benchmark8.c - PRISEC-IV Phase 8 Benchmark (AES-256+ChaCha20+AES-128
+* triple cascade, with and without ECC handshake, with per-layer hardware
+* acceleration toggle)
 *
-* This phase adds the one cascade combination not covered by any earlier
-* phase: a THREE-layer cascade (AES-256 -> ChaCha20 -> AES-128), run in
-* all four configurations needed to complete the comparison table:
+* Entries (2 cascades x 4 hardware states = 8 rows per size):
+*   AES-256+ChaCha20+AES-128
+*   ECC+AES-256+ChaCha20+AES-128
 *
-*   1. AES-256+ChaCha20+AES-128                  (HW accel ON,  ha=1)
-*   2. AES-256+ChaCha20+AES-128                  (HW accel OFF, ha=0)
-*   3. ECC+AES-256+ChaCha20+AES-128               (HW accel ON,  ha=1)
-*   4. ECC+AES-256+ChaCha20+AES-128               (HW accel OFF, ha=0)
+* Hardware states (see ecc.h's get_shared_key(): NID_X9_62_prime256v1 P-256
+* keygen+ECDH via OpenSSL's ecp_nistz256, plus a SHA-256 hash - both of
+* which have their own hardware-accelerated code paths, gated by BMI2/ADX/
+* AVX2 bits that live in the SAME OPENSSL_ia32cap word as ChaCha20's SIMD
+* acceleration, but NOT in the same word as AES-NI):
+*
+*   - HW_ON:           native capabilities, nothing disabled.
+*                       aes_ha=1, chacha_ha=1, ecc_ha=1 (accelerated).
+*   - BOTH_OFF:         AES-NI + ChaCha20 SIMD both disabled (word1 zeroed).
+*                       aes_ha=0, chacha_ha=0, ecc_ha=0 (word1 zeroing also
+*                       kills BMI2/ADX, so ECC is collaterally slowed here).
+*   - AES_ONLY_OFF:     ONLY AES-NI (word0 bit 57) cleared; word1 left
+*                       completely untouched/autodetected.
+*                       aes_ha=0, chacha_ha=1, ecc_ha=1 - ECC is NOT
+*                       affected, because AES-NI has nothing to do with the
+*                       BMI2/ADX/AVX2 bits P-256's ecp_nistz256 path uses.
+*   - CHACHA_ONLY_OFF:  word0 SSSE3+AVX cleared, word1 zeroed (kills
+*                       AVX2/AVX-512 ChaCha20 paths); AES-NI untouched.
+*                       aes_ha=1, chacha_ha=0, ecc_ha=0 - ECC IS affected
+*                       here too, since word1 zeroing removes BMI2/ADX
+*                       regardless of why it was zeroed. This is expected
+*                       and left as-is (see conversation): only the
+*                       AES-only toggle is required to leave ECC untouched.
+*
+* ecc_ha is NA for the non-ECC cascade row (no handshake to accelerate).
 *
 * Layer semantics (mirrors benchmark3.c/benchmark4.c):
-*   - Non-ECC entries: layer1/2/3 keys are fresh random bytes, regenerated
+*   - Non-ECC entry: layer1/2/3 keys are fresh random bytes, regenerated
 *     every outer repeat (benchmark3/5-style).
-*   - ECC entries: each layer's key comes from its own independent ECDH
+*   - ECC entry: each layer's key comes from its own independent ECDH
 *     handshake via get_shared_key() (benchmark2/4-style); ecc_ms sums all
 *     three handshakes.
 *   - Encryption order: L1(AES-256) -> L2(ChaCha20) -> L3(AES-128).
 *     Decryption order: L3 -> L2 -> L1.
 *
-* Hardware-acceleration toggle (benchmark5-style):
-*   AES-NI/PCLMULQDQ/SSSE3/AVX (word0) and everything AVX2-and-newer
-*   (word1) are cleared via OPENSSL_ia32cap, i.e.
-*   OPENSSL_ia32cap="~0x1200020200000000:0". Because OpenSSL's capability
-*   detection runs in a library-load constructor before main(), a plain
-*   fork() cannot change it after the fact -- this benchmark always
-*   completes the HW-ON pass first, then re-execs itself as a *fresh*
-*   process image with the env var set to run the HW-OFF pass, appending
-*   to the same CSV.
+* Because OpenSSL resolves ia32cap-gated capabilities in a library-load
+* constructor that runs before main(), a plain fork() can't change them
+* after the fact - each stage below is a genuine execv() into a fresh
+* process image, chained via the PRISEC_PHASE8_STAGE env var:
+*   (unset) -> HW_ON -> BOTH_OFF -> AES_ONLY_OFF -> CHACHA_ONLY_OFF -> done
 *
 * Build:
 *   gcc -O2 -fno-stack-protector -o benchmark8 benchmark8.c -lcrypto -lm \
@@ -218,11 +235,6 @@ typedef struct {
     double mem_enc_overhead_kb, mem_dec_overhead_kb;
 } result_t;
 
-/*
-* Measures the full three-layer cascade as one region, so the peak
-* correctly includes both intermediate ciphertexts that stay alive while
-* the next layer runs (same rationale as benchmark4.c's two-layer version).
-*/
 static void measure_cascade3_memory(algo_t *L1, algo_t *L2, algo_t *L3,
                                      const uint8_t *key1, const uint8_t *key2, const uint8_t *key3,
                                      const uint8_t *plaintext, size_t data_size,
@@ -402,8 +414,6 @@ static result_t run_combo(cascade3_t *casc, size_entry_t *sz) {
         double thr_enc_mbps = (mean_enc_ms > 0) ? (data_mbits / (mean_enc_ms / 1000.0)) : 0.0;
         double thr_dec_mbps = (mean_dec_ms > 0) ? (data_mbits / (mean_dec_ms / 1000.0)) : 0.0;
 
-        /* All three layers are block ciphers except ChaCha20; use the
-         * smallest block size among block-cipher layers (AES-128 = 16). */
         int has_block_layer = L1->is_block_cipher || L2->is_block_cipher || L3->is_block_cipher;
         double latency_us = 0.0;
         if (has_block_layer) {
@@ -487,28 +497,37 @@ static result_t run_combo(cascade3_t *casc, size_entry_t *sz) {
     return res;
 }
 
-static void write_row(FILE *csv, const char *name, const char *size_label,
-                       result_t *res, int use_ecc, int ha) {
-    if (use_ecc) {
-        fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d\n",
-                name, size_label,
+/* pass_aes_hw/pass_chacha_hw/pass_ecc_hw describe THIS process's actual
+ * capability state (this stage's OPENSSL_ia32cap). ecc_ha is only printed
+ * for the ECC cascade - the non-ECC row has no handshake to accelerate. */
+static void write_row(FILE *csv, cascade3_t *casc, const char *size_label,
+                       result_t *res, int pass_aes_hw, int pass_chacha_hw, int pass_ecc_hw) {
+    char ecc_field[4];
+    if (casc->use_ecc) snprintf(ecc_field, sizeof(ecc_field), "%d", pass_ecc_hw);
+    else snprintf(ecc_field, sizeof(ecc_field), "NA");
+
+    if (casc->use_ecc) {
+        fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%s\n",
+                casc->pair_name, size_label,
                 res->ecc_ms, res->enc_ms, res->dec_ms,
                 res->thr_enc_mbps, res->thr_dec_mbps,
                 res->latency_us,
                 res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb, ha);
+                res->mem_dec_peak_kb, res->mem_dec_overhead_kb,
+                pass_aes_hw, pass_chacha_hw, ecc_field);
     } else {
-        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d\n",
-                name, size_label,
+        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%s\n",
+                casc->pair_name, size_label,
                 res->enc_ms, res->dec_ms,
                 res->thr_enc_mbps, res->thr_dec_mbps,
                 res->latency_us,
                 res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb, ha);
+                res->mem_dec_peak_kb, res->mem_dec_overhead_kb,
+                pass_aes_hw, pass_chacha_hw, ecc_field);
     }
 }
 
-static void run_all_combos(FILE *csv, int ha) {
+static void run_all_combos(FILE *csv, int pass_aes_hw, int pass_chacha_hw, int pass_ecc_hw) {
     for (int c = 0; c < N_CASCADES; c++) {
         for (int s = 0; s < N_SIZES; s++) {
             int pipefd[2];
@@ -547,25 +566,31 @@ static void run_all_combos(FILE *csv, int ha) {
                 continue;
             }
 
-            write_row(csv, CASCADES[c].pair_name, SIZES[s].label, &res, CASCADES[c].use_ecc, ha);
+            write_row(csv, &CASCADES[c], SIZES[s].label, &res, pass_aes_hw, pass_chacha_hw, pass_ecc_hw);
             fflush(csv);
 
-            printf("[parent] [%s | %s | ha=%d] finished -> enc_ms=%.4f dec_ms=%.4f "
-                   "mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
-                   CASCADES[c].pair_name, SIZES[s].label, ha, res.enc_ms, res.dec_ms,
-                   res.mem_enc_peak_kb, res.mem_dec_peak_kb);
+            printf("[parent] [%s | %s | aes_ha=%d chacha_ha=%d ecc_ha=%d] finished -> "
+                   "enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
+                   CASCADES[c].pair_name, SIZES[s].label, pass_aes_hw, pass_chacha_hw, pass_ecc_hw,
+                   res.enc_ms, res.dec_ms, res.mem_enc_peak_kb, res.mem_dec_peak_kb);
             fflush(stdout);
         }
     }
 }
 
 int main(int argc, char **argv) {
-    /* Stage 1 (default): hardware acceleration ON (native OpenSSL caps).
-     * Stage 2: re-exec with OPENSSL_ia32cap forced to disable AES-NI,
-     * PCLMULQDQ, SSSE3, AVX (word0) and AVX2/AVX-512/VAES/etc (word1),
-     * exactly like benchmark5.c, so the HW-OFF pass is a genuinely fresh
-     * process image with capability detection re-run at load time. */
     const char *stage = getenv("PRISEC_PHASE8_STAGE");
+
+    /* Stage chain: unset -> HW_ON -> BOTH_OFF -> AES_ONLY_OFF ->
+     * CHACHA_ONLY_OFF -> done. Each transition sets OPENSSL_ia32cap for
+     * the NEXT stage and execv()s, since capability detection is a
+     * load-time constructor and can't be changed by a plain fork(). */
+    if (!stage) {
+        setenv("PRISEC_PHASE8_STAGE", "HW_ON", 1);
+        execv(argv[0], argv);
+        perror("execv failed to start HW_ON stage");
+        return 1;
+    }
 
     if (!mt_install_openssl()) {
         fprintf(stderr, "CRYPTO_set_mem_functions failed; OpenSSL memory would not be tracked\n");
@@ -584,10 +609,8 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_MAX, 0);
     mallopt(M_TRIM_THRESHOLD, -1);
 
-    FILE *csv;
-    if (!stage) {
-        /* First launch of the real benchmark: fresh CSV, HW-ON pass. */
-        csv = fopen("phase8_results.csv", "w");
+    if (strcmp(stage, "HW_ON") == 0) {
+        FILE *csv = fopen("phase8_results.csv", "w");
         if (!csv) {
             fprintf(stderr, "Failed to open phase8_results.csv for writing\n");
             return 1;
@@ -596,35 +619,75 @@ int main(int argc, char **argv) {
                 "cascade,data_size,ecc_ms,enc_ms,dec_ms,"
                 "throughput_enc_mbps,throughput_dec_mbps,"
                 "latency_us,memory_enc_peak_kb,memory_enc_overhead_kb,"
-                "memory_dec_peak_kb,memory_dec_overhead_kb,ha\n");
+                "memory_dec_peak_kb,memory_dec_overhead_kb,aes_ha,chacha_ha,ecc_ha\n");
 
-        printf("=== Phase 8, pass 1/2: hardware acceleration ON ===\n");
+        printf("=== Phase 8, stage 1/4: HW_ON (native, everything accelerated) ===\n");
         fflush(stdout);
-        run_all_combos(csv, 1);
+        run_all_combos(csv, 1, 1, 1);
         fclose(csv);
 
-        setenv("OPENSSL_ia32cap", "~0x1200020200000000:0", 1);
-        setenv("PRISEC_PHASE8_STAGE", "2", 1);
+        setenv("OPENSSL_ia32cap", "~0x1200020200000000:0", 1); /* BOTH_OFF mask */
+        setenv("PRISEC_PHASE8_STAGE", "BOTH_OFF", 1);
         execv(argv[0], argv);
-        perror("execv failed to disable hardware acceleration for pass 2");
+        perror("execv failed to move to BOTH_OFF stage");
         return 1;
-    } else {
-        /* Second launch: append HW-OFF results to the same CSV. */
-        csv = fopen("phase8_results.csv", "a");
+
+    } else if (strcmp(stage, "BOTH_OFF") == 0) {
+        FILE *csv = fopen("phase8_results.csv", "a");
         if (!csv) {
             fprintf(stderr, "Failed to open phase8_results.csv for appending\n");
             return 1;
         }
 
-        printf("=== Phase 8, pass 2/2: hardware acceleration OFF "
-               "(no AES-NI/SSSE3/AVX2/AVX512) ===\n");
+        printf("=== Phase 8, stage 2/4: BOTH_OFF (AES-NI + ChaCha20 SIMD both off; "
+               "ECC collaterally unaccelerated too - word1 zeroed) ===\n");
         fflush(stdout);
-        run_all_combos(csv, 0);
+        run_all_combos(csv, 0, 0, 0);
         fclose(csv);
 
-        printf("Done. Results written to phase8_results.csv (2 cascades x 2 ha states x %d sizes)\n",
-               N_SIZES);
+        setenv("OPENSSL_ia32cap", "~0x0200000000000000", 1); /* AES-NI only, word1 untouched */
+        setenv("PRISEC_PHASE8_STAGE", "AES_ONLY_OFF", 1);
+        execv(argv[0], argv);
+        perror("execv failed to move to AES_ONLY_OFF stage");
+        return 1;
+
+    } else if (strcmp(stage, "AES_ONLY_OFF") == 0) {
+        FILE *csv = fopen("phase8_results.csv", "a");
+        if (!csv) {
+            fprintf(stderr, "Failed to open phase8_results.csv for appending\n");
+            return 1;
+        }
+
+        printf("=== Phase 8, stage 3/4: AES_ONLY_OFF (AES-NI off, ChaCha20 SIMD on; "
+               "word1 untouched so ECC's BMI2/ADX stay accelerated) ===\n");
+        fflush(stdout);
+        run_all_combos(csv, 0, 1, 1);
+        fclose(csv);
+
+        setenv("OPENSSL_ia32cap", "~0x1000020000000000:0", 1); /* ChaCha SIMD only */
+        setenv("PRISEC_PHASE8_STAGE", "CHACHA_ONLY_OFF", 1);
+        execv(argv[0], argv);
+        perror("execv failed to move to CHACHA_ONLY_OFF stage");
+        return 1;
+
+    } else if (strcmp(stage, "CHACHA_ONLY_OFF") == 0) {
+        FILE *csv = fopen("phase8_results.csv", "a");
+        if (!csv) {
+            fprintf(stderr, "Failed to open phase8_results.csv for appending\n");
+            return 1;
+        }
+
+        printf("=== Phase 8, stage 4/4: CHACHA_ONLY_OFF (ChaCha20 SIMD off, AES-NI on; "
+               "word1 zeroed so ECC is collaterally unaccelerated here too) ===\n");
+        fflush(stdout);
+        run_all_combos(csv, 1, 0, 0);
+        fclose(csv);
+
+        printf("Done. Results written to phase8_results.csv "
+               "(2 cascades x 4 hardware states x %d sizes)\n", N_SIZES);
+        return 0;
     }
 
-    return 0;
+    fprintf(stderr, "Unknown PRISEC_PHASE8_STAGE value: %s\n", stage);
+    return 1;
 }

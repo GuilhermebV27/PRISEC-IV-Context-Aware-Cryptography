@@ -1,42 +1,43 @@
 /*
-* benchmark5.c - PRISEC-IV Phase 5 Benchmark (AES/ChaCha20 family, SOFTWARE-ONLY)
+* benchmark5.c - PRISEC-IV Phase 5 Benchmark (AES/ChaCha20 family,
+* per-layer hardware-acceleration toggle)
 *
-* This is a single-pass, hardware-acceleration-DISABLED run. The
-* hardware-accelerated numbers for these same entries already exist in
-* phase1_results.csv (single ciphers) and phase3_results.csv (cascades),
-* so this benchmark does not repeat that pass — it only produces the
-* software-path comparison point.
+* Entries (9 base + 2 extra):
 *
-* Entries (9 total) — every single cipher and every cascade that mentions
-* AES and/or ChaCha20:
-*
-*   Single ciphers:
+*   Single ciphers (always fully software in this file; the
+*   hardware-accelerated numbers already exist in phase1_results.csv):
 *     AES-128, AES-192, AES-256, ChaCha20
 *
-*   Cascades (layer1 -> layer2):
-*     AES-128+AES-256, AES-128+HIGHT, AES-128+SPECK,
-*     ChaCha20+AES-256, ChaCha20+SPECK
+*   Cascades (Stronger+Weaker naming, matching benchmark3/4/6.c):
+*     AES-256+AES-128, AES-128+HIGHT, AES-128+SPECK,
+*     AES-256+ChaCha20, ChaCha20+SPECK
 *
-* Hardware-acceleration disabling:
-*   An earlier version of this benchmark only cleared the AES-NI bit in
-*   OPENSSL_ia32cap. That's insufficient: AES-NI is a dedicated AES-round
-*   instruction and has nothing to do with ChaCha20, which OpenSSL instead
-*   accelerates with SIMD (SSSE3 / AVX2 / AVX-512) vector code. Clearing
-*   only AES-NI left ChaCha20 fully accelerated even in the "no HW accel"
-*   pass. This version clears both:
+*   Extra AES-256+ChaCha20 hardware-mix variants (the whole point of this
+*   revision): AES-NI and ChaCha20's SIMD acceleration (SSSE3/AVX/AVX2/
+*   AVX-512) are two independent OpenSSL capability bits/words, so
+*   "software-only" isn't one on/off switch for a mixed cascade - you can
+*   disable either half alone. In addition to the fully-software row
+*   above (both off), this file now also produces:
+*     - AES-256+ChaCha20 with AES-NI OFF,  ChaCha20 SIMD ON
+*     - AES-256+ChaCha20 with AES-NI ON,   ChaCha20 SIMD OFF
+*   All three rows share the name "AES-256+ChaCha20"; the aes_ha/chacha_ha
+*   columns are what distinguish them.
 *
-*     - word 0 (CPUID leaf 1, EDX:ECX): AES-NI (bit 57), PCLMULQDQ (bit 33),
-*       SSSE3 (bit 41), AVX (bit 60)
-*     - word 1 (CPUID leaf 7, EBX, offset +64): set to 0, per OpenSSL's own
-*       documented recipe for disabling "all post-AVX extensions"
-*       (AVX2, AVX512F/DQ/BW/VL, VAES, VPCLMULQDQ, etc.)
+* Hardware-acceleration masks (OPENSSL_ia32cap, "~mask[:word1]"):
+*   - BOTH_OFF (word0 AES-NI+PCLMULQDQ+SSSE3+AVX cleared, word1 zeroed):
+*       ~0x1200020200000000:0        (unchanged from the original phase5)
+*   - AES_ONLY_OFF (word0 AES-NI bit 57 only; word1 untouched/autodetected,
+*     so ChaCha20's SSSE3/AVX2/AVX-512 path stays available):
+*       ~0x0200000000000000
+*   - CHACHA_ONLY_OFF (word0 SSSE3 bit41 + AVX bit60 cleared, word1
+*     zeroed to kill AVX2/AVX-512/VAES; AES-NI/PCLMULQDQ untouched):
+*       ~0x1000020000000000:0
 *
-*   i.e. OPENSSL_ia32cap="~0x1200020200000000:0"
-*
-*   As with the AES-NI-only version, this decision is baked in by an
-*   OpenSSL library-load constructor that runs before main(), so a plain
-*   fork() can't change it after the fact — the environment variable must
-*   be set before a real execve() of a fresh process image.
+* As before, OpenSSL resolves these capabilities in a library-load
+* constructor that runs before main(), so a plain fork() can't change them
+* after the fact - each stage below is a genuine execv() into a fresh
+* process image, chained via the PRISEC_PHASE5_STAGE env var:
+*   (unset) -> BOTH_OFF -> AES_ONLY_OFF -> CHACHA_ONLY_OFF -> done
 *
 * Build:
 *   gcc -O2 -fno-stack-protector -o benchmark5 benchmark5.c -lcrypto -lm \
@@ -113,6 +114,7 @@ static int cmp_double(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
     return (da > db) - (da < db);
 }
+
 static double median(double *arr, int n) {
     qsort(arr, n, sizeof(double), cmp_double);
     if (n % 2 == 1) return arr[n / 2];
@@ -136,6 +138,7 @@ static int wrap_aes_enc(const uint8_t *key, int key_len,
     *out = buf;
     return 1;
 }
+
 static int wrap_aes_dec(const uint8_t *key, int key_len,
                          const uint8_t *in, size_t in_len,
                          uint8_t **out, size_t *out_len) {
@@ -156,6 +159,7 @@ static int wrap_chacha_enc(const uint8_t *key, int key_len,
     *out = buf;
     return 1;
 }
+
 static int wrap_chacha_dec(const uint8_t *key, int key_len,
                             const uint8_t *in, size_t in_len,
                             uint8_t **out, size_t *out_len) {
@@ -175,6 +179,7 @@ static int wrap_speck_enc(const uint8_t *key, int key_len,
     *out = buf;
     return 1;
 }
+
 static int wrap_speck_dec(const uint8_t *key, int key_len,
                            const uint8_t *in, size_t in_len,
                            uint8_t **out, size_t *out_len) {
@@ -192,6 +197,7 @@ static int wrap_hight_enc(const uint8_t *key, int key_len,
     hight_encrypt(key, in, in_len, out, out_len);
     return (*out != NULL);
 }
+
 static int wrap_hight_dec(const uint8_t *key, int key_len,
                            const uint8_t *in, size_t in_len,
                            uint8_t **out, size_t *out_len) {
@@ -202,21 +208,24 @@ static int wrap_hight_dec(const uint8_t *key, int key_len,
     return 1;
 }
 
+typedef enum { FAM_AES, FAM_CHACHA, FAM_OTHER } family_t;
+
 typedef struct {
     const char *name;
     int key_len_bytes;
     int is_block_cipher;
     int block_size;
+    family_t family;
     enc_fn enc;
     dec_fn dec;
 } algo_t;
 
-static algo_t AES128   = { "AES-128",  16, 1, 16, wrap_aes_enc,    wrap_aes_dec    };
-static algo_t AES192   = { "AES-192",  24, 1, 16, wrap_aes_enc,    wrap_aes_dec    };
-static algo_t AES256   = { "AES-256",  32, 1, 16, wrap_aes_enc,    wrap_aes_dec    };
-static algo_t CHACHA20 = { "ChaCha20", 32, 0, 0,  wrap_chacha_enc, wrap_chacha_dec };
-static algo_t SPECK_   = { "SPECK",    16, 1, 16, wrap_speck_enc,  wrap_speck_dec  };
-static algo_t HIGHT_   = { "HIGHT",    16, 1, 8,  wrap_hight_enc,  wrap_hight_dec  };
+static algo_t AES128 = { "AES-128", 16, 1, 16, FAM_AES, wrap_aes_enc, wrap_aes_dec };
+static algo_t AES192 = { "AES-192", 24, 1, 16, FAM_AES, wrap_aes_enc, wrap_aes_dec };
+static algo_t AES256 = { "AES-256", 32, 1, 16, FAM_AES, wrap_aes_enc, wrap_aes_dec };
+static algo_t CHACHA20 = { "ChaCha20", 32, 0, 0, FAM_CHACHA, wrap_chacha_enc, wrap_chacha_dec };
+static algo_t SPECK_ = { "SPECK", 16, 1, 16, FAM_OTHER, wrap_speck_enc, wrap_speck_dec };
+static algo_t HIGHT_ = { "HIGHT", 16, 1, 8, FAM_OTHER, wrap_hight_enc, wrap_hight_dec };
 
 /* Single-cipher entries: every AES variant and ChaCha20. */
 static algo_t *SINGLE_ALGOS[] = { &AES128, &AES192, &AES256, &CHACHA20 };
@@ -228,9 +237,7 @@ typedef struct {
     algo_t *layer2;
 } cascade_t;
 
-/* Cascade entries: every benchmark3.c cascade that mentions AES and/or
- * ChaCha20 in either layer (SPECK+HIGHT and HIGHT+RECTANGLE are excluded,
- * since neither layer is AES or ChaCha20). */
+/* Named Stronger+Weaker throughout, matching benchmark3/4/6.c. */
 static cascade_t CASCADES[] = {
     { "AES-256+AES-128", &AES256, &AES128 },
     { "AES-128+HIGHT", &AES128, &HIGHT_ },
@@ -243,15 +250,15 @@ static cascade_t CASCADES[] = {
 typedef struct { const char *label; size_t bytes; } size_entry_t;
 
 static size_entry_t SIZES[] = {
-    { "1KB",   1UL * 1024 },
-    { "5KB",   5UL * 1024 },
-    { "10KB",  10UL * 1024 },
-    { "50KB",  50UL * 1024 },
+    { "1KB", 1UL * 1024 },
+    { "5KB", 5UL * 1024 },
+    { "10KB", 10UL * 1024 },
+    { "50KB", 50UL * 1024 },
     { "100KB", 100UL * 1024 },
-    { "1MB",   1UL * 1024 * 1024 },
-    { "5MB",   5UL * 1024 * 1024 },
-    { "10MB",  10UL * 1024 * 1024 },
-    { "50MB",  50UL * 1024 * 1024 },
+    { "1MB", 1UL * 1024 * 1024 },
+    { "5MB", 5UL * 1024 * 1024 },
+    { "10MB", 10UL * 1024 * 1024 },
+    { "50MB", 50UL * 1024 * 1024 },
 };
 #define N_SIZES (int)(sizeof(SIZES)/sizeof(SIZES[0]))
 
@@ -268,11 +275,10 @@ typedef struct {
     double mem_enc_overhead_kb, mem_dec_overhead_kb;
 } result_t;
 
-/* Same semantics as benchmark1.c's measure_memory_isolated(). */
 static void measure_memory_isolated(algo_t *algo, const uint8_t *key,
-        const uint8_t *plaintext, size_t data_size,
-        double *mem_enc_peak_kb, double *mem_enc_overhead_kb,
-        double *mem_dec_peak_kb, double *mem_dec_overhead_kb) {
+                                     const uint8_t *plaintext, size_t data_size,
+                                     double *mem_enc_peak_kb, double *mem_enc_overhead_kb,
+                                     double *mem_dec_peak_kb, double *mem_dec_overhead_kb) {
     uint8_t *ct = NULL; size_t ct_len = 0;
 
     size_t base_enc = mt_mark();
@@ -305,12 +311,11 @@ static void measure_memory_isolated(algo_t *algo, const uint8_t *key,
     free(pt);
 }
 
-/* Same semantics as benchmark3.c's measure_cascade_memory(). */
 static void measure_cascade_memory(algo_t *L1, algo_t *L2,
-        const uint8_t *key1, const uint8_t *key2,
-        const uint8_t *plaintext, size_t data_size,
-        double *mem_enc_peak_kb, double *mem_enc_overhead_kb,
-        double *mem_dec_peak_kb, double *mem_dec_overhead_kb) {
+                                    const uint8_t *key1, const uint8_t *key2,
+                                    const uint8_t *plaintext, size_t data_size,
+                                    double *mem_enc_peak_kb, double *mem_enc_overhead_kb,
+                                    double *mem_dec_peak_kb, double *mem_dec_overhead_kb) {
     uint8_t *ct1 = NULL; size_t ct1_len = 0;
     uint8_t *ct2 = NULL; size_t ct2_len = 0;
 
@@ -571,85 +576,114 @@ static result_t run_combo_cascade(cascade_t *casc, size_entry_t *sz) {
     return res;
 }
 
+/* pass_aes_hw / pass_chacha_hw describe the CURRENT process-wide hardware
+ * state (this pass's OPENSSL_ia32cap). A family that isn't present in this
+ * entry at all (e.g. no ChaCha20 layer) prints NA rather than 0/1. */
 static void write_row(FILE *csv, const char *name, const char *size_label,
-                       result_t *res, int has_block_layer) {
-    /* ha is always 0 in this benchmark: every entry runs software-only. */
+                       result_t *res, int has_block_layer,
+                       int has_aes, int has_chacha,
+                       int pass_aes_hw, int pass_chacha_hw) {
+    char aes_field[4], chacha_field[4];
+    if (has_aes) snprintf(aes_field, sizeof(aes_field), "%d", pass_aes_hw);
+    else snprintf(aes_field, sizeof(aes_field), "NA");
+    if (has_chacha) snprintf(chacha_field, sizeof(chacha_field), "%d", pass_chacha_hw);
+    else snprintf(chacha_field, sizeof(chacha_field), "NA");
+
     if (has_block_layer) {
-        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0\n",
+        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%s,%s\n",
                 name, size_label,
                 res->enc_ms, res->dec_ms,
                 res->thr_enc_mbps, res->thr_dec_mbps,
                 res->latency_us,
                 res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb);
+                res->mem_dec_peak_kb, res->mem_dec_overhead_kb,
+                aes_field, chacha_field);
     } else {
-        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f,%.4f,%.4f,0\n",
+        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f,%.4f,%.4f,%s,%s\n",
                 name, size_label,
                 res->enc_ms, res->dec_ms,
                 res->thr_enc_mbps, res->thr_dec_mbps,
                 res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb);
+                res->mem_dec_peak_kb, res->mem_dec_overhead_kb,
+                aes_field, chacha_field);
     }
 }
 
-static void run_all_combos(FILE *csv) {
-    for (int a = 0; a < N_SINGLE; a++) {
-        for (int s = 0; s < N_SIZES; s++) {
-            int pipefd[2];
-            if (pipe(pipefd) != 0) {
-                fprintf(stderr, "pipe() failed for %s %s\n", SINGLE_ALGOS[a]->name, SIZES[s].label);
-                continue;
-            }
-            pid_t pid = fork();
-            if (pid < 0) {
-                fprintf(stderr, "fork() failed for %s %s\n", SINGLE_ALGOS[a]->name, SIZES[s].label);
-                close(pipefd[0]); close(pipefd[1]);
-                continue;
-            }
-            if (pid == 0) {
-                close(pipefd[0]);
-                srand((unsigned)time(NULL) ^ (unsigned)getpid());
-                result_t res = run_combo_single(SINGLE_ALGOS[a], &SIZES[s]);
-                ssize_t written = write(pipefd[1], &res, sizeof(res));
-                (void)written;
-                close(pipefd[1]);
-                _exit(0);
-            }
-            close(pipefd[1]);
-            result_t res; memset(&res, 0, sizeof(res));
-            ssize_t n = read(pipefd[0], &res, sizeof(res));
-            close(pipefd[0]);
-            int status;
-            waitpid(pid, &status, 0);
-            if (n != (ssize_t)sizeof(res) || !res.valid) {
-                fprintf(stderr, "Child failed or returned no data for %s %s\n",
-                        SINGLE_ALGOS[a]->name, SIZES[s].label);
-                continue;
-            }
-            write_row(csv, SINGLE_ALGOS[a]->name, SIZES[s].label, &res,
-                      SINGLE_ALGOS[a]->is_block_cipher);
-            fflush(csv);
+/* filter_name == NULL runs every single + every cascade (the BOTH_OFF
+ * pass); non-NULL restricts to the one matching cascade (used by the two
+ * AES-256+ChaCha20 mixed-hardware passes). */
+static void run_all_combos(FILE *csv, int pass_aes_hw, int pass_chacha_hw,
+                            const char *filter_name) {
+    if (!filter_name) {
+        for (int a = 0; a < N_SINGLE; a++) {
+            for (int s = 0; s < N_SIZES; s++) {
+                int pipefd[2];
+                if (pipe(pipefd) != 0) {
+                    fprintf(stderr, "pipe() failed for %s %s\n", SINGLE_ALGOS[a]->name, SIZES[s].label);
+                    continue;
+                }
 
-            printf("[parent] [%s | %s] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
-                   SINGLE_ALGOS[a]->name, SIZES[s].label, res.enc_ms, res.dec_ms,
-                   res.mem_enc_peak_kb, res.mem_dec_peak_kb);
-            fflush(stdout);
+                pid_t pid = fork();
+                if (pid < 0) {
+                    fprintf(stderr, "fork() failed for %s %s\n", SINGLE_ALGOS[a]->name, SIZES[s].label);
+                    close(pipefd[0]); close(pipefd[1]);
+                    continue;
+                }
+
+                if (pid == 0) {
+                    close(pipefd[0]);
+                    srand((unsigned)time(NULL) ^ (unsigned)getpid());
+                    result_t res = run_combo_single(SINGLE_ALGOS[a], &SIZES[s]);
+                    ssize_t written = write(pipefd[1], &res, sizeof(res));
+                    (void)written;
+                    close(pipefd[1]);
+                    _exit(0);
+                }
+
+                close(pipefd[1]);
+                result_t res; memset(&res, 0, sizeof(res));
+                ssize_t n = read(pipefd[0], &res, sizeof(res));
+                close(pipefd[0]);
+                int status;
+                waitpid(pid, &status, 0);
+                if (n != (ssize_t)sizeof(res) || !res.valid) {
+                    fprintf(stderr, "Child failed or returned no data for %s %s\n",
+                            SINGLE_ALGOS[a]->name, SIZES[s].label);
+                    continue;
+                }
+
+                int has_aes = (SINGLE_ALGOS[a]->family == FAM_AES);
+                int has_chacha = (SINGLE_ALGOS[a]->family == FAM_CHACHA);
+                write_row(csv, SINGLE_ALGOS[a]->name, SIZES[s].label, &res,
+                          SINGLE_ALGOS[a]->is_block_cipher,
+                          has_aes, has_chacha, pass_aes_hw, pass_chacha_hw);
+                fflush(csv);
+
+                printf("[parent] [%s | %s] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
+                       SINGLE_ALGOS[a]->name, SIZES[s].label, res.enc_ms, res.dec_ms,
+                       res.mem_enc_peak_kb, res.mem_dec_peak_kb);
+                fflush(stdout);
+            }
         }
     }
 
     for (int c = 0; c < N_CASCADES; c++) {
+        if (filter_name && strcmp(CASCADES[c].pair_name, filter_name) != 0) continue;
+
         for (int s = 0; s < N_SIZES; s++) {
             int pipefd[2];
             if (pipe(pipefd) != 0) {
                 fprintf(stderr, "pipe() failed for %s %s\n", CASCADES[c].pair_name, SIZES[s].label);
                 continue;
             }
+
             pid_t pid = fork();
             if (pid < 0) {
                 fprintf(stderr, "fork() failed for %s %s\n", CASCADES[c].pair_name, SIZES[s].label);
                 close(pipefd[0]); close(pipefd[1]);
                 continue;
             }
+
             if (pid == 0) {
                 close(pipefd[0]);
                 srand((unsigned)time(NULL) ^ (unsigned)getpid());
@@ -659,6 +693,7 @@ static void run_all_combos(FILE *csv) {
                 close(pipefd[1]);
                 _exit(0);
             }
+
             close(pipefd[1]);
             result_t res; memset(&res, 0, sizeof(res));
             ssize_t n = read(pipefd[0], &res, sizeof(res));
@@ -670,8 +705,12 @@ static void run_all_combos(FILE *csv) {
                         CASCADES[c].pair_name, SIZES[s].label);
                 continue;
             }
+
             int has_block_layer = CASCADES[c].layer1->is_block_cipher || CASCADES[c].layer2->is_block_cipher;
-            write_row(csv, CASCADES[c].pair_name, SIZES[s].label, &res, has_block_layer);
+            int has_aes = (CASCADES[c].layer1->family == FAM_AES) || (CASCADES[c].layer2->family == FAM_AES);
+            int has_chacha = (CASCADES[c].layer1->family == FAM_CHACHA) || (CASCADES[c].layer2->family == FAM_CHACHA);
+            write_row(csv, CASCADES[c].pair_name, SIZES[s].label, &res, has_block_layer,
+                      has_aes, has_chacha, pass_aes_hw, pass_chacha_hw);
             fflush(csv);
 
             printf("[parent] [%s | %s] finished -> enc_ms=%.4f dec_ms=%.4f mem_enc_peak_kb=%.4f mem_dec_peak_kb=%.4f\n\n",
@@ -683,16 +722,16 @@ static void run_all_combos(FILE *csv) {
 }
 
 int main(int argc, char **argv) {
-    /* Step 1: force OPENSSL_ia32cap to disable AES-NI, PCLMULQDQ, SSSE3,
-     * AVX (word 0) and everything AVX2-and-newer (word 1), then re-exec
-     * a fresh process so OpenSSL's library-load capability detection
-     * picks it up. Without a real execve, the already-resolved capability
-     * decision from before main() would survive a plain fork(). */
-    if (!getenv("PRISEC_HA_DISABLED")) {
-        setenv("OPENSSL_ia32cap", "~0x1200020200000000:0", 1);
-        setenv("PRISEC_HA_DISABLED", "1", 1);
+    const char *stage = getenv("PRISEC_PHASE5_STAGE");
+
+    /* Stage chain: unset -> BOTH_OFF -> AES_ONLY_OFF -> CHACHA_ONLY_OFF -> done.
+     * Each transition sets OPENSSL_ia32cap for the NEXT stage and execv()s,
+     * since capability detection is a load-time constructor. */
+    if (!stage) {
+        setenv("OPENSSL_ia32cap", "~0x1200020200000000:0", 1); /* BOTH_OFF mask */
+        setenv("PRISEC_PHASE5_STAGE", "BOTH_OFF", 1);
         execv(argv[0], argv);
-        perror("execv failed to disable hardware acceleration");
+        perror("execv failed to disable hardware acceleration (BOTH_OFF)");
         return 1;
     }
 
@@ -713,23 +752,64 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_MAX, 0);
     mallopt(M_TRIM_THRESHOLD, -1);
 
-    FILE *csv = fopen("phase5_results.csv", "w");
-    if (!csv) {
-        fprintf(stderr, "Failed to open phase5_results.csv for writing\n");
+    if (strcmp(stage, "BOTH_OFF") == 0) {
+        FILE *csv = fopen("phase5_results.csv", "w");
+        if (!csv) {
+            fprintf(stderr, "Failed to open phase5_results.csv for writing\n");
+            return 1;
+        }
+        fprintf(csv,
+                "cascade,data_size,ecc_ms,enc_ms,dec_ms,"
+                "throughput_enc_mbps,throughput_dec_mbps,"
+                "latency_us,memory_enc_peak_kb,memory_enc_overhead_kb,"
+                "memory_dec_peak_kb,memory_dec_overhead_kb,aes_ha,chacha_ha\n");
+
+        printf("=== Phase 5, stage 1/3: BOTH_OFF (no AES-NI/SSSE3/AVX2/AVX512) ===\n");
+        fflush(stdout);
+        run_all_combos(csv, 0, 0, NULL);
+        fclose(csv);
+
+        setenv("OPENSSL_ia32cap", "~0x0200000000000000", 1); /* AES-NI only */
+        setenv("PRISEC_PHASE5_STAGE", "AES_ONLY_OFF", 1);
+        execv(argv[0], argv);
+        perror("execv failed to move to AES_ONLY_OFF stage");
         return 1;
+
+    } else if (strcmp(stage, "AES_ONLY_OFF") == 0) {
+        FILE *csv = fopen("phase5_results.csv", "a");
+        if (!csv) {
+            fprintf(stderr, "Failed to open phase5_results.csv for appending\n");
+            return 1;
+        }
+
+        printf("=== Phase 5, stage 2/3: AES-256+ChaCha20, AES-NI OFF / ChaCha20 SIMD ON ===\n");
+        fflush(stdout);
+        run_all_combos(csv, 0, 1, "AES-256+ChaCha20");
+        fclose(csv);
+
+        setenv("OPENSSL_ia32cap", "~0x1000020000000000:0", 1); /* ChaCha SIMD only */
+        setenv("PRISEC_PHASE5_STAGE", "CHACHA_ONLY_OFF", 1);
+        execv(argv[0], argv);
+        perror("execv failed to move to CHACHA_ONLY_OFF stage");
+        return 1;
+
+    } else if (strcmp(stage, "CHACHA_ONLY_OFF") == 0) {
+        FILE *csv = fopen("phase5_results.csv", "a");
+        if (!csv) {
+            fprintf(stderr, "Failed to open phase5_results.csv for appending\n");
+            return 1;
+        }
+
+        printf("=== Phase 5, stage 3/3: AES-256+ChaCha20, AES-NI ON / ChaCha20 SIMD OFF ===\n");
+        fflush(stdout);
+        run_all_combos(csv, 1, 0, "AES-256+ChaCha20");
+        fclose(csv);
+
+        printf("Done. Results written to phase5_results.csv "
+               "(9 base rows + 2 AES-256+ChaCha20 mixed-hardware rows)\n");
+        return 0;
     }
-    fprintf(csv,
-        "cascade,data_size,ecc_ms,enc_ms,dec_ms,"
-        "throughput_enc_mbps,throughput_dec_mbps,"
-        "latency_us,memory_enc_peak_kb,memory_enc_overhead_kb,"
-        "memory_dec_peak_kb,memory_dec_overhead_kb,ha\n");
 
-    printf("=== Phase 5 (software-only, no AES-NI/SSSE3/AVX2/AVX512) ===\n");
-    fflush(stdout);
-
-    run_all_combos(csv);
-
-    fclose(csv);
-    printf("Done. Results written to phase5_results.csv (all rows ha=0)\n");
-    return 0;
+    fprintf(stderr, "Unknown PRISEC_PHASE5_STAGE value: %s\n", stage);
+    return 1;
 }
