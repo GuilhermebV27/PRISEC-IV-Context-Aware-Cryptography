@@ -1,94 +1,69 @@
 /*
-* benchmark5.c - PRISEC-IV Phase 5 Benchmark (cipher/cascade setup cost +
-* ECC key-exchange cost)
-*
-* [Formerly benchmark6.c / Phase 6. Renumbered to Phase 5, freed up when
-* the original benchmark5.c (AES/ChaCha20 family, HW toggle) became
-* benchmark4.c.]
-*
-* Measures pure "setup time" - key schedule / cipher-context initialization,
-* with no encryption or decryption involved - for every single cipher and
-* every non-ECC cascade already used in benchmark1.c/benchmark2.c, plus the
-* three-layer cascade from benchmark3.c, PLUS the ECC-prefixed variants
-* (single cipher, two-layer cascade, three-layer cascade), whose setup cost
-* is the matching ECC key-exchange cost added to the cipher(s)' own setup
-* cost, mirroring how benchmark2.c/benchmark4.c (formerly benchmark3.c/
-* benchmark4.c) derive keys via get_shared_key() - one independent
-* handshake per layer.
-*
-* Single ciphers:
-*   AES-128, AES-192, AES-256, ChaCha20, SPECK, RECTANGLE, HIGHT
-*
-* Two-layer cascades (Stronger+Weaker naming, matching benchmark2/4/8.c):
-*   AES-256+AES-128, AES-128+HIGHT, AES-128+SPECK, AES-256+ChaCha20,
-*   ChaCha20+SPECK, SPECK+HIGHT, RECTANGLE+HIGHT
-*
-* Three-layer cascade:
-*   AES-256+ChaCha20+AES-128
-*
-* ECC key-exchange cost (raw, in isolation - N_ECC_RUNS iterations each,
-* fresh handshake(s) per iteration, median reported):
-*   ECC-handshake-x1 (single get_shared_key() call)
-*   ECC-handshake-x2 (two back-to-back calls, one per cascade layer)
-*   ECC-handshake-x3 (three back-to-back calls, one per cascade layer)
-*
-* ECC + single cipher (setup = ECC-handshake-x1 + the cipher's own setup):
-*   ECC+AES-128, ECC+AES-256, ECC+ChaCha20, ECC+SPECK, ECC+RECTANGLE,
-*   ECC+HIGHT
-*
-* ECC + two-layer cascade (setup = ECC-handshake-x2 + the cascade's own
-* combined setup, i.e. the same layer1+layer2 span used for the non-ECC
-* cascades above):
-*   ECC+AES-256+AES-128, ECC+AES-256+ChaCha20, ECC+AES-128+SPECK,
-*   ECC+ChaCha20+SPECK, ECC+SPECK+HIGHT
-*
-* ECC + three-layer cascade (setup = ECC-handshake-x3 + the three layers'
-* combined setup):
-*   ECC+AES-256+ChaCha20+AES-128
-*
-* "Setup" is defined per algorithm as the work needed before the first byte
-* can be encrypted:
-*   - AES / ChaCha20 (OpenSSL EVP) -> EVP_CIPHER_CTX_new() + the two
-*                                     EVP_*Init_ex() calls that load the key
-*                                     (IV-length/tag ctrl included for AES).
-*                                     EVP_CIPHER_CTX_free() runs *after* the
-*                                     timer stops - teardown isn't setup.
-*   - SPECK / HIGHT / RECTANGLE     -> their key-schedule expansion routine
-*                                     (software round-key derivation; this
-*                                     is identical regardless of which
-*                                     RECTANGLE encryption implementation -
-*                                     AVX2 or portable bitslice - is used
-*                                     elsewhere, since both share the same
-*                                     key schedule).
-*   - Cascades                      -> each layer's setup run back-to-back,
-*                                     timed as one span (mirrors how
-*                                     benchmark2.c/benchmark3.c time a
-*                                     cascade's enc/dec as a single region).
-*   - ECC                           -> get_shared_key() (EC P-256 keygen x2
-*                                     + ECDH derive + SHA-256), one call per
-*                                     cascade layer, timed as one span.
-*
-* For each setup-cost entry, the value is measured N_RUNS (1000) times with
-* a fresh random key per iteration, and the median is reported. The three
-* raw ECC handshake entries use N_ECC_RUNS (100000) iterations instead,
-* per-iteration key material coming from get_shared_key() itself. Both
-* N_RUNS and N_ECC_RUNS are #define'd below so they're easy to adjust.
-* Output: cipher/cascade name + setup_us.
-*
-* Build:
-*   gcc -O2 -o benchmark5 benchmark5.c -lcrypto -lm
-* Run:
-*   ./benchmark5
-*/
+ * benchmark5.c - PRISEC-IV Phase 5 Benchmark (cipher/cascade setup cost +
+ * ECC key-exchange cost)
+ *
+ * Measures pure "setup time" - key schedule / cipher-context initialization,
+ * with no encryption or decryption involved - for every single cipher and
+ * every non-ECC cascade already used in benchmark1.c/benchmark2.c, plus the
+ * three-layer cascade from benchmark3.c, PLUS the ECC-prefixed variants
+ * (single cipher, two-layer cascade, three-layer cascade), whose setup cost
+ * is the matching ECC key-exchange cost added to the cipher(s)' own setup
+ * cost.
+ *
+ * ECC key-exchange cost is now derived via get_shared_keys_hkdf(): ONE
+ * ECDH exchange (EC P-256 keygen x2 + derive), then n_keys HKDF-Expand
+ * calls (one per cascade layer) instead of n independent full ECDH
+ * exchanges. The elliptic-curve cost is paid once regardless of cascade
+ * length; only cheap HKDF-Expand calls scale with the number of layers.
+ *
+ * Single ciphers:
+ * AES-128, AES-192, AES-256, ChaCha20, SPECK, RECTANGLE, HIGHT
+ *
+ * Two-layer cascades (Stronger+Weaker naming, matching benchmark2/4/8.c):
+ * AES-256+AES-128, AES-128+HIGHT, AES-128+SPECK, AES-256+ChaCha20,
+ * ChaCha20+SPECK, SPECK+HIGHT, RECTANGLE+HIGHT
+ *
+ * Three-layer cascade:
+ * AES-256+ChaCha20+AES-128
+ *
+ * ECC key-exchange cost (raw, in isolation - N_ECC_RUNS iterations each,
+ * fresh derivation per iteration, median reported):
+ * ECC-handshake-x1 (1 key derived: one ECDH + 1 HKDF-Expand)
+ * ECC-handshake-x2 (2 keys derived: one ECDH + 2 HKDF-Expand)
+ * ECC-handshake-x3 (3 keys derived: one ECDH + 3 HKDF-Expand)
+ *
+ * ECC + single cipher (setup = ECC-handshake-x1 + the cipher's own setup):
+ * ECC+AES-128, ECC+AES-256, ECC+ChaCha20, ECC+SPECK, ECC+RECTANGLE,
+ * ECC+HIGHT
+ *
+ * ECC + two-layer cascade (setup = ECC-handshake-x2 + the cascade's own
+ * combined setup):
+ * ECC+AES-256+AES-128, ECC+AES-256+ChaCha20, ECC+AES-128+SPECK,
+ * ECC+ChaCha20+SPECK, ECC+SPECK+HIGHT
+ *
+ * ECC + three-layer cascade (setup = ECC-handshake-x3 + the three layers'
+ * combined setup):
+ * ECC+AES-256+ChaCha20+AES-128
+ *
+ * For each setup-cost entry, the value is measured N_RUNS (1000) times with
+ * a fresh random key per iteration, and the median is reported. The three
+ * ECC handshake entries use N_ECC_RUNS (100000) iterations instead.
+ * Output: cipher/cascade name + setup_us.
+ *
+ * Build:
+ * gcc -O2 -o benchmark5 benchmark5.c -lcrypto -lm
+ * Run:
+ * ./benchmark5
+ */
 
 #define _POSIX_C_SOURCE 199309L
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #include "aes.h"
 #include "chacha20.h"
@@ -212,7 +187,6 @@ typedef struct {
     algo_t *layer2;
 } cascade_t;
 
-/* Named Stronger+Weaker throughout, matching benchmark2/4/8.c. */
 static cascade_t CASCADES[] = {
     { "AES-256+AES-128", &AES256, &AES128 },
     { "AES-128+HIGHT", &AES128, &HIGHT_ },
@@ -224,7 +198,6 @@ static cascade_t CASCADES[] = {
 };
 #define N_CASCADES (int)(sizeof(CASCADES)/sizeof(CASCADES[0]))
 
-/* Three-layer cascade, same naming convention, matching benchmark3.c. */
 typedef struct {
     const char *triple_name;
     algo_t *layer1;
@@ -237,9 +210,6 @@ static cascade3_t CASCADES3[] = {
 };
 #define N_CASCADES3 (int)(sizeof(CASCADES3)/sizeof(CASCADES3[0]))
 
-/* ECC-prefixed variants: the "cipher(s)" part reuses the exact same algo_t
- * pointers as above, so their setup routines and key sizes are identical -
- * only the reported name changes and an ECC handshake cost gets added. */
 static algo_t *ECC_SINGLE_ALGOS[] = { &AES128, &AES256, &CHACHA20, &SPECK_, &RECTANGLE_, &HIGHT_ };
 #define N_ECC_SINGLE (int)(sizeof(ECC_SINGLE_ALGOS)/sizeof(ECC_SINGLE_ALGOS[0]))
 
@@ -270,7 +240,6 @@ static double run_single_setup(algo_t *algo) {
 
         times[i] = t1 - t0;
     }
-
     return median(times, N_RUNS);
 }
 
@@ -291,7 +260,6 @@ static double run_cascade_setup(cascade_t *casc) {
 
         times[i] = t1 - t0;
     }
-
     return median(times, N_RUNS);
 }
 
@@ -315,34 +283,29 @@ static double run_cascade3_setup(cascade3_t *casc) {
 
         times[i] = t1 - t0;
     }
-
     return median(times, N_RUNS);
 }
 
-/* Raw ECC handshake cost, in isolation - n_handshakes back-to-back
- * get_shared_key() calls per iteration, timed as one span, median of
- * N_ECC_RUNS iterations. n_handshakes=1/2/3 covers ECC+single,
- * ECC+two-layer-cascade, and ECC+three-layer-cascade respectively (one
- * independent handshake per cascade layer, matching benchmark2.c/
- * benchmark4.c's derivation). Buffer size is fixed at 32 bytes (SHA-256
- * digest size) since the handshake's own cost doesn't depend on the
- * downstream cipher's key length. */
-static double run_ecc_handshake(int n_handshakes) {
+/* ECC handshake cost, in isolation - n_keys derived per iteration via
+ * ONE ECDH exchange + n_keys HKDF-Expand calls, timed as one span,
+ * median of N_ECC_RUNS iterations. n_keys=1/2/3 covers ECC+single,
+ * ECC+two-layer-cascade, and ECC+three-layer-cascade respectively. */
+static double run_ecc_handshake(int n_keys) {
     double *times = (double *)malloc(sizeof(double) * N_ECC_RUNS);
-    uint8_t shared[32];
+    uint8_t buf1[32], buf2[32], buf3[32];
+    uint8_t *out_keys[3] = { buf1, buf2, buf3 };
+    int key_sizes[3] = { 32, 32, 32 };
 
     for (int i = 0; i < N_ECC_RUNS; i++) {
         double t0 = now_us();
-        for (int h = 0; h < n_handshakes; h++) {
-            if (!get_shared_key(shared, sizeof(shared))) {
-                fprintf(stderr, "[ECC x%d] handshake failed on run %d\n", n_handshakes, i + 1);
-            }
+        if (!get_shared_keys_hkdf(out_keys, key_sizes, n_keys)) {
+            fprintf(stderr, "[ECC x%d] derivation failed on run %d\n", n_keys, i + 1);
         }
         double t1 = now_us();
         times[i] = t1 - t0;
 
         if ((i + 1) % 10000 == 0) {
-            printf("[ECC x%d] %d/%d handshake runs done\n", n_handshakes, i + 1, N_ECC_RUNS);
+            printf("[ECC x%d] %d/%d runs done\n", n_keys, i + 1, N_ECC_RUNS);
             fflush(stdout);
         }
     }
@@ -390,8 +353,6 @@ int main(void) {
         fflush(stdout);
     }
 
-    /* Raw ECC handshake cost - single, double, triple - reported on their
-     * own rows too, so the ECC+X combined numbers below are auditable. */
     printf("=== ECC handshake cost (median of %d runs each) ===\n", N_ECC_RUNS);
     fflush(stdout);
 
