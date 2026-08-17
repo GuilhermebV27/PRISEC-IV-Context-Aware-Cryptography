@@ -41,3 +41,37 @@ class DecisionOut(DecisionCreate):
 
     class Config:
         from_attributes = True
+
+
+# --- Decision engine request/response ---------------------------------
+
+class DecisionContext(BaseModel):
+    security_level: str          # Guest / Basic / Advanced / Admin
+    data_confidentiality: str    # Low / Medium / High
+    data_lifetime: str           # Short-term / Medium-term / Long-term
+    duty_cycle: str              # Sporadic / Periodic / Continuous
+    latency_tolerance: str       # High / Medium / Low
+    throughput_required: str     # Low / Medium / High / Very High
+    packet_size_bytes: int
+
+
+class DecisionWeights(BaseModel):
+    device: float = 1 / 3
+    security: float = 1 / 3
+    application: float = 1 / 3
+
+
+class DecisionRequest(BaseModel):
+    profile_id: int
+    context: DecisionContext
+    weights: DecisionWeights | None = None
+
+
+class DecisionResponse(BaseModel):
+    recommended_ciphers: list[str]
+    infeasible: bool
+    reason: str | None = None
+    excluded_for_memory: list[str] | None = None
+    requirement: float | None = None
+    weights_used: dict
+    scores: dict | None = None   # full per-cipher breakdown, for auditability
