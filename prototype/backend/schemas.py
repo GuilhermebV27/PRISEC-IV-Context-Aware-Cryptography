@@ -33,7 +33,7 @@ class DecisionCreate(BaseModel):
     profile_id: int
     context_json: str          # or a nested model, see note below
     recommended_cipher: str
-    decision_metadata: Optional[str] = None
+    decision_metadata: str | None = None
 
 class DecisionOut(DecisionCreate):
     id: int

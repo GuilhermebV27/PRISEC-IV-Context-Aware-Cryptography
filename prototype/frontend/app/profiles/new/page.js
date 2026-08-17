@@ -6,7 +6,7 @@ import { Shield, Pencil, Check } from "lucide-react";
 import { createProfile } from "../../lib/api";
 import { computeDeviceTier, CPU_OPTIONS } from "../../lib/Devicetier";
 
-const SIMD_TIER_OPTIONS = ["avx512", "avx2", "sve", "ssse3", "neon", "scalar"];
+const SIMD_TIER_OPTIONS = ["avx512", "avx2", "sve", "ssse3", "neon"];
 
 const CLOCK_MULTIPLIERS = { kHz: 0.001, MHz: 1, GHz: 1000 }; // → MHz
 const RAM_MULTIPLIERS = { kB: 1 / 1024, MB: 1, GB: 1024 }; // → MB
@@ -161,7 +161,7 @@ export default function NewProfilePage() {
         battery_powered: form.battery_powered,
         hw_accel_aes_ni,
         hw_accel_simd_presence,
-        hw_accel_simd_best_tier: hw_accel_simd_presence ? form.hw_accel_simd_best_tier : "scalar",
+        hw_accel_simd_best_tier: hw_accel_simd_presence ? form.hw_accel_simd_best_tier : null,
         device_tier,
       };
       await createProfile(payload);
@@ -196,7 +196,7 @@ export default function NewProfilePage() {
         battery_powered: specs.battery_powered,
         hw_accel_aes_ni: specs.hw_accel_aes_ni,
         hw_accel_simd_presence: specs.hw_accel_simd_presence,
-        hw_accel_simd_best_tier: specs.hw_accel_simd_best_tier || "scalar",
+        hw_accel_simd_best_tier: specs.hw_accel_simd_best_tier ?? null,
       }));
 
       setDetected(true);

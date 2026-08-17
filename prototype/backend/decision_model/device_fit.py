@@ -26,10 +26,17 @@ def memory_feasible(cipher_entry, device, packet_size_bytes: int) -> bool:
     exceeds the device's RAM, it cannot run without fragmenting the buffer
     into smaller chunks - an architectural change this model doesn't
     support, so such a cipher is excluded from candidates entirely rather
-    than just scored very low."""
-    row = cipher_entry.benchmark_for(device, packet_size_bytes)
+    than just scored very low.
+
+    Uses the linear-fit memory estimate (catalog.CipherEntry.estimate_memory_kb),
+    not the closest benchmarked row's raw value - a request between two
+    benchmarked sizes (e.g. 0.6MB) would otherwise round to whichever real
+    row is numerically closer (e.g. 1MB) and use THAT row's footprint,
+    wrongly excluding a cipher that would actually fit at the real
+    requested size."""
     device_ram_kb = device.ram_size_mb * 1024
-    return row.memory_enc_peak_kb <= device_ram_kb
+    estimated_kb = cipher_entry.estimate_memory_kb(device).estimate(packet_size_bytes)
+    return estimated_kb <= device_ram_kb
 
 
 def memory_fit(cipher_memory_kb: float, device_ram_kb: float) -> float:
@@ -79,7 +86,8 @@ def device_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict 
     row = cipher_entry.benchmark_for(device, packet_size_bytes)
     device_ram_kb = device.ram_size_mb * 1024  # ram_size stored in MB per the profile schema
 
-    mem_fit = memory_fit(row.memory_enc_peak_kb, device_ram_kb)
+    estimated_memory_kb = cipher_entry.estimate_memory_kb(device).estimate(packet_size_bytes)
+    mem_fit = memory_fit(estimated_memory_kb, device_ram_kb)
     wrd_fit = word_fit(cipher_entry.name, device.word_bits)
 
     if not device.battery_powered:

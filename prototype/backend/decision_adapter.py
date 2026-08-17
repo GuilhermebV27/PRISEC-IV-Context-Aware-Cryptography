@@ -25,7 +25,7 @@ def build_device(profile, duty_cycle: str) -> Device:
         word_bits=word_bits_for(profile.cpu_architecture),
         battery_powered=bool(profile.battery_powered),
         hw_accel_aes_ni=bool(profile.hw_accel_aes_ni),
-        hw_accel_simd_best_tier=profile.hw_accel_simd_best_tier or "scalar",
+        hw_accel_simd_best_tier=profile.hw_accel_simd_best_tier,  # may be None - no SIMD, not a "scalar" tier
         duty_cycle=duty_cycle,
     )
 

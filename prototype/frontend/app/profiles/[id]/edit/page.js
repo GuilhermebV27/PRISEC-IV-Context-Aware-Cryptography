@@ -6,7 +6,7 @@ import { Shield, Pencil } from "lucide-react";
 import { getProfile, updateProfile } from "../../../lib/api";
 import { computeDeviceTier, CPU_OPTIONS } from "../../../lib/Devicetier";
 
-const SIMD_TIER_OPTIONS = ["avx512", "avx2", "sve", "ssse3", "neon", "scalar"];
+const SIMD_TIER_OPTIONS = ["avx512", "avx2", "sve", "ssse3", "neon"];
 
 const CLOCK_MULTIPLIERS = { kHz: 0.001, MHz: 1, GHz: 1000 }; // → MHz
 const RAM_MULTIPLIERS = { kB: 1 / 1024, MB: 1, GB: 1024 }; // → MB
@@ -167,7 +167,7 @@ export default function EditProfilePage() {
         battery_powered: specs.battery_powered,
         hw_accel_aes_ni: specs.hw_accel_aes_ni,
         hw_accel_simd_presence: specs.hw_accel_simd_presence,
-        hw_accel_simd_best_tier: specs.hw_accel_simd_best_tier || "scalar",
+        hw_accel_simd_best_tier: specs.hw_accel_simd_best_tier ?? null,
       }));
 
       setDetected(true);
@@ -231,7 +231,7 @@ export default function EditProfilePage() {
         hw_accel_aes_ni: form.hw_accel_aes_ni === true,
         hw_accel_simd_presence: form.hw_accel_simd_presence === true,
         hw_accel_simd_best_tier:
-          form.hw_accel_simd_presence === true ? form.hw_accel_simd_best_tier : "scalar",
+          form.hw_accel_simd_presence === true ? form.hw_accel_simd_best_tier : null,
         device_tier,
       };
       await updateProfile(id, payload);

@@ -14,12 +14,50 @@ const DATA_LIFETIME_OPTIONS = [
   "Medium-term (days to weeks)",
   "Long-term archival",
 ];
+// Backend (security_fit.py) expects exactly these short values, not the
+// descriptive UI labels above.
+const DATA_LIFETIME_TO_BACKEND = {
+  "Short-term (session only)": "Short-term",
+  "Medium-term (days to weeks)": "Medium-term",
+  "Long-term archival": "Long-term",
+};
+const PACKET_UNIT_TO_BYTES = { B: 1, KB: 1024, MB: 1024 * 1024 };
 const THROUGHPUT_TIERS = [
   { key: "low", label: "Low", score: 0.25 },
   { key: "medium", label: "Medium", score: 0.5 },
   { key: "high", label: "High", score: 0.75 },
   { key: "very_high", label: "Very High", score: 1.0 },
 ];
+
+const EPSILON = 1e-9;
+const DEFAULT_WEIGHTS = { device: 1 / 3, security: 1 / 3, application: 1 / 3 };
+
+// Defined OUTSIDE the page component on purpose: if this were nested inside
+// ContextPage's body, React would see a new function reference every render
+// (i.e. on every drag tick) and remount the <input> DOM node instead of just
+// updating it - which kills native slider dragging entirely.
+function WeightRow({ label, weightKey, weights, onChange }) {
+  const value = weights[weightKey];
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <label className="font-mono text-xs text-[#5b8cff] tracking-wide">{label}</label>
+        <span className="w-14 text-right font-mono text-sm text-[#c7c7c7]">
+          {value.toFixed(2)}
+        </span>
+      </div>
+      <input
+        type="range"
+        min="0"
+        max="1"
+        step="0.001"
+        value={value}
+        onChange={(e) => onChange(weightKey, parseFloat(e.target.value))}
+        className="w-full accent-[#5b8cff]"
+      />
+    </div>
+  );
+}
 
 function formatClockSpeed(mhz) {
   if (!mhz) return "—";
@@ -40,10 +78,7 @@ export default function ContextPage() {
 
   const [profile, setProfile] = useState(null);
   const [loadingProfile, setLoadingProfile] = useState(true);
-  const [result, setResult] = useState({
-    cipher: "AES-256-GCM",
-    explanation: "Advanced security and high confidentiality call for a well-vetted, hardware-accelerated AEAD cipher.",
-  });
+  const [result, setResult] = useState(null);
   const [matchesDevice, setMatchesDevice] = useState(null);
   const [runningTest, setRunningTest] = useState(false);
 
@@ -57,6 +92,8 @@ export default function ContextPage() {
     latency_tolerance: null,
     data_lifetime: DATA_LIFETIME_OPTIONS[0],
   });
+
+  const [weights, setWeights] = useState(DEFAULT_WEIGHTS);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -133,6 +170,24 @@ export default function ContextPage() {
     </div>
   );
 
+  // Rightward movement is capped by what's actually left (1 - the other
+  // two); leftward movement is always free. The <input>'s own min/max stay
+  // fixed at 0/1 always (see WeightRow above) so the thumb's position is
+  // always visually accurate - only the STATE value gets clamped, not the
+  // track's range. This can leave the sum below 1 (lowering one doesn't
+  // auto-raise another) - that's expected; the submit gate below requires
+  // the user to explicitly bring it back to exactly 1.
+  const updateWeight = (key, rawValue) => {
+    const otherKeys = Object.keys(weights).filter((k) => k !== key);
+    const othersSum = otherKeys.reduce((sum, k) => sum + weights[k], 0);
+    const maxAllowed = Math.max(0, 1 - othersSum);
+    const clamped = Math.min(Math.max(rawValue, 0), maxAllowed);
+    setWeights((prev) => ({ ...prev, [key]: clamped }));
+  };
+
+  const weightsSum = weights.device + weights.security + weights.application;
+  const weightsValid = Math.abs(weightsSum - 1) < EPSILON;
+
   const handleSubmit = async () => {
     if (
       !form.security_level ||
@@ -145,32 +200,41 @@ export default function ContextPage() {
       setError("Please fill in all required fields.");
       return;
     }
+    if (!weightsValid) {
+      setError(`Decision weights must sum to exactly 1 (currently ${weightsSum.toFixed(3)}).`);
+      return;
+    }
 
     setSaving(true);
     setError(null);
     try {
-      const throughputScore = THROUGHPUT_TIERS.find((t) => t.key === form.throughput_tier).score;
+      const throughputLabel = THROUGHPUT_TIERS.find((t) => t.key === form.throughput_tier).label;
+      const packetSizeBytes = Math.round(
+        parseFloat(form.packet_size) * PACKET_UNIT_TO_BYTES[form.packet_unit]
+      );
 
       const payload = {
         profile_id: parseInt(id),
         context: {
           security_level: form.security_level,
-          packet_size: parseFloat(form.packet_size),
-          packet_unit: form.packet_unit,
           data_confidentiality: form.data_confidentiality,
-          throughput_tier: form.throughput_tier,
-          throughput_score: throughputScore,
+          data_lifetime: DATA_LIFETIME_TO_BACKEND[form.data_lifetime],
           duty_cycle: form.duty_cycle,
           latency_tolerance: form.latency_tolerance,
-          data_lifetime: form.data_lifetime,
+          throughput_required: throughputLabel,
+          packet_size_bytes: packetSizeBytes,
         },
+        weights,
       };
       const res = await fetch("http://127.0.0.1:8000/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error("Failed to run decision model");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail ? JSON.stringify(body.detail) : "Failed to run decision model");
+      }
       const data = await res.json();
       setResult(data);
     } catch (err) {
@@ -237,7 +301,7 @@ export default function ContextPage() {
                 <span className="text-sm font-semibold">{profile.name}</span>
               </div>
               <span className="font-mono text-xs text-[#8a8a8a]">
-                {profile.cpu_architecture} · {formatClockSpeed(profile.clock_speed)} · {profile.core_count} · {formatRam(profile.ram_size)} · {profile.battery_powered ? "Yes" : "No"} · {profile.hw_accel_aes_ni ? "Yes" : "No"}
+                {profile.cpu_architecture} · {formatClockSpeed(profile.clock_speed)} · {profile.core_count} · {formatRam(profile.ram_size)} · {profile.battery_powered ? "Yes" : "No"} · AES-NI: {profile.hw_accel_aes_ni ? "Yes" : "No"} · SIMD: {profile.hw_accel_simd_presence ? (profile.hw_accel_simd_best_tier || "—").toUpperCase() : "No"}
               </span>
             </div>
 
@@ -345,6 +409,32 @@ export default function ContextPage() {
                 </div>
               </div>
 
+              {/* Decision Weights */}
+              <div className="border-t border-white/10 mt-4 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <label className="font-mono text-xs text-[#5b8cff] tracking-wide">
+                    DECISION WEIGHTS
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setWeights(DEFAULT_WEIGHTS)}
+                    className="text-[11px] font-mono text-[#8a8a8a] hover:text-[#5b8cff] transition"
+                  >
+                    Reset to equal thirds
+                  </button>
+                </div>
+
+                <div className="flex flex-col gap-3">
+                  <WeightRow label="DEVICE" weightKey="device" weights={weights} onChange={updateWeight} />
+                  <WeightRow label="SECURITY" weightKey="security" weights={weights} onChange={updateWeight} />
+                  <WeightRow label="APPLICATION" weightKey="application" weights={weights} onChange={updateWeight} />
+                </div>
+
+                <p className={`text-[11px] font-mono mt-2 ${weightsValid ? "text-[#8a8a8a]" : "text-red-400"}`}>
+                  Sum: {weightsSum.toFixed(3)} {weightsValid ? "✓" : "— must equal exactly 1"}
+                </p>
+              </div>
+
               <div className="border-t border-white/10 mt-4 pt-3 flex justify-between items-center">
                 <button
                   type="button"
@@ -356,7 +446,7 @@ export default function ContextPage() {
                 <button
                   type="button"
                   onClick={handleSubmit}
-                  disabled={saving}
+                  disabled={saving || !weightsValid}
                   className="px-6 py-2 rounded-md text-sm font-semibold text-[#0a0a0a] bg-gradient-to-b from-[#7aa3ff] to-[#4a7bef] shadow hover:shadow-lg transition disabled:opacity-50"
                 >
                   {saving ? "Running..." : "Run Simulation"}
@@ -381,11 +471,30 @@ export default function ContextPage() {
                 <span className="text-[15px] font-semibold">Simulation Result</span>
               </div>
 
-              <div className="border border-[#5b8cff]/30 bg-[#5b8cff]/[0.06] rounded-lg p-4 mb-5">
-                <div className="text-[11px] text-[#5b8cff] mb-1">Recommended Cipher</div>
-                <div className="font-mono text-[15px] font-semibold mb-1.5">{result.cipher}</div>
-                <div className="text-[12px] text-[#a9a9a9] leading-relaxed">{result.explanation}</div>
-              </div>
+              {result === null ? (
+                <div className="border border-white/10 rounded-lg p-4 mb-5 text-[12.5px] text-[#8a8a8a]">
+                  Fill in the context on the left and run the simulation to see a recommendation here.
+                </div>
+              ) : result.infeasible ? (
+                <div className="border border-red-500/30 bg-red-500/[0.06] rounded-lg p-4 mb-5">
+                  <div className="text-[11px] text-red-400 mb-1">No cipher fits this request</div>
+                  <div className="text-[12px] text-[#a9a9a9] leading-relaxed">{result.reason}</div>
+                </div>
+              ) : (
+                <div className="border border-[#5b8cff]/30 bg-[#5b8cff]/[0.06] rounded-lg p-4 mb-5">
+                  <div className="text-[11px] text-[#5b8cff] mb-1">
+                    {result.recommended_ciphers.length > 1 ? "Recommended Ciphers (tied)" : "Recommended Cipher"}
+                  </div>
+                  <div className="font-mono text-[15px] font-semibold mb-1.5">
+                    {result.recommended_ciphers.join(", ")}
+                  </div>
+                  {result.scores && result.recommended_ciphers.length > 0 && (
+                    <div className="text-[12px] text-[#a9a9a9] leading-relaxed">
+                      Cipher Fit: {result.scores[result.recommended_ciphers[0]].final_score.toFixed(4)}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="border-t border-white/10 pt-4">
                 <p className="text-sm font-semibold mb-1">Test with real encryption</p>

@@ -232,6 +232,45 @@ class CipherEntry:
                 return row
         raise ValueError(f"No benchmark data at all for '{self.name}'")
 
+    def estimate_memory_kb(self, device) -> "MemoryModel":
+        """
+        Derives a linear model (fixed_kb + slope * size_bytes) for this
+        cipher's memory usage, from the two smallest REAL benchmarked points
+        at the device's matching hardware variant. Verified against actual
+        data: predicts every other real benchmarked size essentially
+        exactly (not just small sizes) - single ciphers get slope~1
+        (buffer ~= packet size), cascades get slope~N (N buffers, since
+        the intermediate ciphertext from each stage scales with data too).
+
+        This replaces closest_size() for memory specifically, since
+        closest_size() uses a fixed-size row's memory value as-is even for
+        a very different requested size - correct at the 9 benchmarked
+        points, wrong everywhere between them (the bug this fixes: a 0.6MB
+        request rounding to the 1MB row's ~1MB+ footprint and being
+        wrongly excluded on a 1MB-RAM device).
+        """
+        desired = desired_accel_flags(self.name, device)
+        by_size = self.variants.get(desired) or next(iter(self.variants.values()), {})
+        sizes = sorted(by_size.keys())
+        if len(sizes) < 2:
+            only = by_size[sizes[0]] if sizes else None
+            return MemoryModel(fixed_kb=only.memory_enc_peak_kb if only else 0.0, slope=0.0)
+
+        s1, s2 = sizes[0], sizes[1]
+        p1, p2 = by_size[s1].memory_enc_peak_kb, by_size[s2].memory_enc_peak_kb
+        slope = (p2 - p1) / (s2 - s1)
+        fixed_kb = p1 - slope * s1
+        return MemoryModel(fixed_kb=fixed_kb, slope=slope)
+
+
+@dataclass
+class MemoryModel:
+    fixed_kb: float
+    slope: float  # kb of memory per byte of packet size
+
+    def estimate(self, target_bytes: int) -> float:
+        return self.fixed_kb + self.slope * target_bytes
+
 
 def _load_consolidated(path: str) -> dict:
     """Returns {name: {(aes_flag, simd_flag): {size_bytes: BenchmarkRow}}}
