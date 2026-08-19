@@ -116,6 +116,7 @@ static int check_rfc8439_vector(void) {
     chacha20_block(key, 0, nonce, output);
     return memcmp(output, expected, sizeof(expected)) == 0;
 }
+static int compare_uint64(const void *a, const void *b);
 
 int main(void) {
     static const uint8_t key[32] = {
@@ -164,8 +165,7 @@ int main(void) {
     }
 
     /* Simple insertion sort is intentionally avoided here; qsort is portable. */
-    qsort(timings, SAMPLES, sizeof(uint64_t),
-          (int (*)(const void *, const void *))compare_uint64);
+    qsort(timings, SAMPLES, sizeof(uint64_t), compare_uint64);
 
     median = timings[SAMPLES / 2U];
     p10 = timings[SAMPLES / 10U];
@@ -191,7 +191,7 @@ int main(void) {
     return 0;
 }
 
-int compare_uint64(const void *a, const void *b) {
+static int compare_uint64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a;
     uint64_t y = *(const uint64_t *)b;
     return (x > y) - (x < y);
