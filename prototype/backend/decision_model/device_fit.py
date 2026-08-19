@@ -46,11 +46,11 @@ def memory_fit(cipher_memory_kb: float, device_ram_kb: float) -> float:
     return (1 - utilization) * PENALTY_FACTOR
 
 
-def word_fit(cipher_name: str, device_word_bits: int) -> float:
+def word_fit(cipher_name: str, device) -> float:
     """Delegates to catalog.word_fit_for_cascade - handles per-component
     behavior (SPECK's adaptive floor, RECTANGLE's full adaptability, fixed
-    ciphers) uniformly, worst-component-wins for cascades."""
-    return catalog.word_fit_for_cascade(cipher_name, device_word_bits)
+    ciphers, and AES's AES-NI-aware special case) uniformly, worst-component-wins for cascades."""
+    return catalog.word_fit_for_cascade(cipher_name, device)
 
 
 def energy_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict) -> Optional[float]:
@@ -88,7 +88,7 @@ def device_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict 
 
     estimated_memory_kb = cipher_entry.estimate_memory_kb(device).estimate(packet_size_bytes)
     mem_fit = memory_fit(estimated_memory_kb, device_ram_kb)
-    wrd_fit = word_fit(cipher_entry.name, device.word_bits)
+    wrd_fit = word_fit(cipher_entry.name, device)
 
     if not device.battery_powered:
         score = 0.5 * mem_fit + 0.5 * wrd_fit

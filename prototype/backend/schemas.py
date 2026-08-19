@@ -33,7 +33,7 @@ class DecisionCreate(BaseModel):
     profile_id: int
     context_json: str          # or a nested model, see note below
     recommended_cipher: str
-    decision_metadata: str | None = None
+    decision_metadata: Optional[str] = None
 
 class DecisionOut(DecisionCreate):
     id: int
@@ -65,6 +65,7 @@ class DecisionRequest(BaseModel):
     profile_id: int
     context: DecisionContext
     weights: DecisionWeights | None = None
+    persist: bool = True  # set False for debug/exploratory runs that shouldn't be saved to the decisions table
 
 
 class DecisionResponse(BaseModel):

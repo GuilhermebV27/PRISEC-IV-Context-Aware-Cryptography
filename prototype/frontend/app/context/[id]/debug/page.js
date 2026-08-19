@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Shield, Sliders, FlaskConical } from "lucide-react";
-import { getProfile } from "../../lib/api";
+import { Shield, Sliders, ArrowLeftRight } from "lucide-react";
+import { getProfile } from "../../../lib/api";
 
 const SECURITY_LEVELS = ["Guest", "Basic", "Advanced", "Admin"];
 const CONFIDENTIALITY_LEVELS = ["Low", "Medium", "High"];
@@ -226,6 +226,7 @@ export default function ContextPage() {
           packet_size_bytes: packetSizeBytes,
         },
         weights,
+        persist: false, // debug page - exploratory runs shouldn't clutter the decisions table
       };
       const res = await fetch("http://127.0.0.1:8000/decision", {
         method: "POST",
@@ -276,11 +277,16 @@ export default function ContextPage() {
 
       {/* Header */}
       <div className="relative flex items-center justify-between px-20 pt-7">
-        <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">PRISEC-IV</div>
-        <Link href={`/context/${id}/debug`}>
+        <div className="flex items-center gap-2">
+          <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">PRISEC-IV</div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-[#5b8cff]/40 text-[#5b8cff]">
+            DEBUG MODE
+          </span>
+        </div>
+        <Link href={`/context/${id}`}>
           <button className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border border-white/15 text-[#8a8a8a] hover:bg-white/5 hover:text-[#5b8cff] transition">
-            <FlaskConical size={14} />
-            Debug Mode
+            <ArrowLeftRight size={14} />
+            Exit Debug Mode
           </button>
         </Link>
       </div>
@@ -500,6 +506,110 @@ export default function ContextPage() {
                       Cipher Fit: {result.scores[result.recommended_ciphers[0]].final_score.toFixed(4)}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Full per-cipher debug breakdown - shows every fit calculation
+                  and its inputs for every candidate cipher, not just the winner. */}
+              {result && !result.infeasible && result.scores && (
+                <div className="border-t border-white/10 pt-4 mb-4">
+                  <p className="text-sm font-semibold mb-1">Full model breakdown</p>
+                  <p className="text-xs text-[#8a8a8a] leading-relaxed mb-4">
+                    Every candidate cipher's fit scores and the raw values behind them, sorted by final score.
+                  </p>
+
+                  {result.excluded_for_memory && result.excluded_for_memory.length > 0 && (
+                    <div className="mb-4 text-[11px] text-[#c7c7c7] font-mono">
+                      Excluded (peak memory exceeds device RAM):{" "}
+                      <span className="text-red-400">{result.excluded_for_memory.join(", ")}</span>
+                    </div>
+                  )}
+
+                  <div className="overflow-x-auto rounded-lg border border-white/10">
+                    <table className="w-full text-[11px] font-mono border-collapse">
+                      <thead>
+                        <tr className="bg-[#0a0a0a] text-[#5b8cff]">
+                          <th rowSpan={2} className="px-2 py-2 text-left border-b border-white/10 align-bottom">
+                            Cipher
+                          </th>
+                          <th rowSpan={2} className="px-2 py-2 text-right border-b border-white/10 align-bottom">
+                            Final
+                          </th>
+                          <th colSpan={4} className="px-2 py-1 text-center border-b border-l border-white/10">
+                            Device Fit
+                          </th>
+                          <th colSpan={3} className="px-2 py-1 text-center border-b border-l border-white/10">
+                            Security Fit
+                          </th>
+                          <th colSpan={6} className="px-2 py-1 text-center border-b border-l border-white/10">
+                            Application Fit
+                          </th>
+                        </tr>
+                        <tr className="bg-[#0a0a0a] text-[#8a8a8a]">
+                          <th className="px-2 py-1 text-right border-b border-l border-white/10">score</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">mem</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">word</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">energy</th>
+                          <th className="px-2 py-1 text-right border-b border-l border-white/10">score</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">strength</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">requir.</th>
+                          <th className="px-2 py-1 text-right border-b border-l border-white/10">score</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">throughput</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">latency</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">setup</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">amort.</th>
+                          <th className="px-2 py-1 text-right border-b border-white/10">w(setup)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(result.scores)
+                          .sort((a, b) => b[1].final_score - a[1].final_score)
+                          .map(([name, s]) => {
+                            const isWinner = result.recommended_ciphers.includes(name);
+                            const fmt = (v, d = 3) => (v === null || v === undefined ? "—" : Number(v).toFixed(d));
+                            return (
+                              <tr
+                                key={name}
+                                className={`border-b border-white/5 ${isWinner ? "bg-[#5b8cff]/[0.08] text-[#f5f5f5]" : "text-[#c7c7c7]"}`}
+                              >
+                                <td className="px-2 py-1.5 whitespace-nowrap">
+                                  {isWinner ? "★ " : ""}
+                                  {name}
+                                </td>
+                                <td className="px-2 py-1.5 text-right font-semibold">{fmt(s.final_score, 4)}</td>
+                                <td className="px-2 py-1.5 text-right border-l border-white/5">{fmt(s.device_fit.score)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.device_fit.breakdown.memory_fit)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.device_fit.breakdown.word_fit)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.device_fit.breakdown.energy_fit)}</td>
+                                <td className="px-2 py-1.5 text-right border-l border-white/5">{fmt(s.security_fit.score)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.security_fit.breakdown.security_strength)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.security_fit.breakdown.requirement)}</td>
+                                <td className="px-2 py-1.5 text-right border-l border-white/5">{fmt(s.application_fit.score)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.application_fit.breakdown.throughput_fit)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.application_fit.breakdown.latency_fit)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.application_fit.breakdown.setup_fit)}</td>
+                                <td className="px-2 py-1.5 text-right">{fmt(s.application_fit.breakdown.amortization_factor)}</td>
+                                <td className="px-2 py-1.5 text-right">
+                                  {fmt(s.application_fit.breakdown.weights_effective?.setup)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="text-[10px] text-[#8a8a8a] mt-2">
+                    ★ = recommended. "—" = not applicable (e.g. energy fit when device isn't battery-powered).
+                  </p>
+                </div>
+              )}
+              {result && result.infeasible && (
+                <div className="border-t border-white/10 pt-4 mb-4">
+                  <p className="text-sm font-semibold mb-1">Full model breakdown</p>
+                  <p className="text-xs text-[#8a8a8a] leading-relaxed">
+                    No breakdown to show — the request was rejected before any cipher was scored ({result.reason}).
+                  </p>
                 </div>
               )}
 

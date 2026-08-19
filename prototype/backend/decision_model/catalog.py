@@ -87,54 +87,78 @@ def cipher_components(name: str) -> list:
     return n.split("+")
 
 
-def component_word_fit(component: str, device_word_bits: int) -> float:
+AES_NI_NARROW_DEVICE_WORD_FIT = 0.9  # flat fit for AES on <32-bit devices WITH AES-NI present
+AES_NI_NARROW_DEVICE_WORD_PENALTY = 1 / AES_NI_NARROW_DEVICE_WORD_FIT  # ~1.111, reciprocal for time-scaling consistency
+
+
+def component_word_fit(component: str, device) -> float:
     """0-1 fit score for a single cascade component against a device's word
     size. RECTANGLE: fully adaptive, always 1.0. SPECK: adapts down to its
-    floor (CIPHER_WORD_ADAPT_FLOOR_BITS), penalized only below that. Fixed
-    ciphers (AES/ChaCha20/HIGHT): standard ratio, capped at 1.0."""
+    floor (CIPHER_WORD_ADAPT_FLOOR_BITS), penalized only below that. AES with
+    AES-NI present: no penalty at all on >=32-bit devices (same as without
+    AES-NI - width was never the bottleneck there); on <32-bit devices, a
+    flat 0.9 instead of the raw ratio, since AES-NI closes most of the gap
+    even on narrow hardware. ChaCha20 with real SIMD present (any tier in
+    _CHACHA_SIMD_TIERS): full exemption, always 1.0 regardless of device word
+    width - SIMD lanes do native 32-bit ARX ops independent of the scalar
+    ALU width, unlike AES-NI's single fixed-function block instruction, so
+    no partial discount is warranted here. AES without AES-NI, ChaCha20
+    without SIMD, and HIGHT always: standard ratio, capped at 1.0."""
     if component == "RECTANGLE":
         return 1.0
+    if component == "ChaCha20" and device.hw_accel_simd_best_tier in _CHACHA_SIMD_TIERS:
+        return 1.0
+    if component.startswith("AES") and device.hw_accel_aes_ni:
+        if device.word_bits >= 32:
+            return 1.0
+        return AES_NI_NARROW_DEVICE_WORD_FIT
     floor = CIPHER_WORD_ADAPT_FLOOR_BITS.get(component)
     if floor is not None:
-        if device_word_bits >= floor:
+        if device.word_bits >= floor:
             return 1.0
-        return device_word_bits / floor
+        return device.word_bits / floor
     bits = CIPHER_OPERAND_BITS.get(component)
     if bits is None:
         return 1.0
-    return min(1.0, device_word_bits / bits)
+    return min(1.0, device.word_bits / bits)
 
 
-def word_fit_for_cascade(name: str, device_word_bits: int) -> float:
+def word_fit_for_cascade(name: str, device) -> float:
     """Cascade's overall word_fit = the worst (minimum) per-component fit -
     a device narrower than any single stage's requirement is penalized for
     that stage, regardless of how well the others fit."""
     comps = cipher_components(name)
-    return min(component_word_fit(c, device_word_bits) for c in comps)
+    return min(component_word_fit(c, device) for c in comps)
 
 
-def component_word_penalty(component: str, device_word_bits: int) -> float:
+def component_word_penalty(component: str, device) -> float:
     """Time-multiplier version (>=1, never speeds things up) - the inverse
     shape of component_word_fit, for use in the application-side time
-    scaling formula."""
+    scaling formula. Mirrors the same AES-NI and ChaCha20-SIMD special cases."""
     if component == "RECTANGLE":
         return 1.0
+    if component == "ChaCha20" and device.hw_accel_simd_best_tier in _CHACHA_SIMD_TIERS:
+        return 1.0
+    if component.startswith("AES") and device.hw_accel_aes_ni:
+        if device.word_bits >= 32:
+            return 1.0
+        return AES_NI_NARROW_DEVICE_WORD_PENALTY
     floor = CIPHER_WORD_ADAPT_FLOOR_BITS.get(component)
     if floor is not None:
-        if device_word_bits >= floor:
+        if device.word_bits >= floor:
             return 1.0
-        return floor / device_word_bits
+        return floor / device.word_bits
     bits = CIPHER_OPERAND_BITS.get(component)
     if bits is None:
         return 1.0
-    return max(1.0, bits / device_word_bits)
+    return max(1.0, bits / device.word_bits)
 
 
-def word_penalty_for_cascade(name: str, device_word_bits: int) -> float:
+def word_penalty_for_cascade(name: str, device) -> float:
     """Cascade's overall time penalty = the worst (maximum) per-component
     penalty, matching word_fit_for_cascade's use of the minimum fit."""
     comps = cipher_components(name)
-    return max(component_word_penalty(c, device_word_bits) for c in comps)
+    return max(component_word_penalty(c, device) for c in comps)
 
 
 def is_ecc(name: str) -> bool:

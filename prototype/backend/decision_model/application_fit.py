@@ -23,25 +23,25 @@ DUTY_CYCLE_WEIGHTS = {
 }
 
 
-def word_penalty(cipher_name: str, device_word_bits: int) -> float:
+def word_penalty(cipher_name: str, device) -> float:
     """Delegates to catalog.word_penalty_for_cascade - same per-component
     handling as device_fit.word_fit, worst-component-wins for cascades."""
-    return catalog.word_penalty_for_cascade(cipher_name, device_word_bits)
+    return catalog.word_penalty_for_cascade(cipher_name, device)
 
 
-def scale_time(benchmark_value_ms_or_us: float, device_clock_mhz: float, cipher_name: str, device_word_bits: int) -> float:
+def scale_time(benchmark_value_ms_or_us: float, device_clock_mhz: float, cipher_name: str, device) -> float:
     """Applies clock-speed + word-size scaling. Unit-agnostic (works for both
     enc_ms and setup_us, caller keeps track of which unit is which)."""
     clock_ratio = REFERENCE_CLOCK_MHZ / device_clock_mhz
-    return benchmark_value_ms_or_us * clock_ratio * word_penalty(cipher_name, device_word_bits)
+    return benchmark_value_ms_or_us * clock_ratio * word_penalty(cipher_name, device)
 
 
-def scale_throughput(benchmark_throughput_mbps: float, device_clock_mhz: float, cipher_name: str, device_word_bits: int) -> float:
+def scale_throughput(benchmark_throughput_mbps: float, device_clock_mhz: float, cipher_name: str, device) -> float:
     """Throughput is inversely related to time, so it scales by the INVERSE
     of scale_time()'s multiplier - a slower/narrower device gets LOWER
     throughput, not higher."""
     clock_ratio = REFERENCE_CLOCK_MHZ / device_clock_mhz
-    multiplier = clock_ratio * word_penalty(cipher_name, device_word_bits)
+    multiplier = clock_ratio * word_penalty(cipher_name, device)
     return benchmark_throughput_mbps / multiplier
 
 
@@ -94,8 +94,8 @@ def amortization_factor(cipher_entry, device, packet_size_bytes: int) -> float:
     device, at this packet size. This is the MEASURED share of total work
     that setup represents - not modeled/estimated."""
     row = cipher_entry.benchmark_for(device, packet_size_bytes)
-    scaled_setup_us = scale_time(cipher_entry.setup_us, device.clock_speed_mhz, cipher_entry.name, device.word_bits)
-    scaled_enc_us = scale_time(row.enc_ms * 1000, device.clock_speed_mhz, cipher_entry.name, device.word_bits)
+    scaled_setup_us = scale_time(cipher_entry.setup_us, device.clock_speed_mhz, cipher_entry.name, device)
+    scaled_enc_us = scale_time(row.enc_ms * 1000, device.clock_speed_mhz, cipher_entry.name, device)
     total = scaled_setup_us + scaled_enc_us
     if total == 0:
         return 0.0
@@ -116,9 +116,9 @@ def application_fit(cipher_entry, device, packet_size_bytes: int, context,
     scaled_throughputs, scaled_latencies, scaled_setups = {}, {}, {}
     for name, entry in candidate_entries.items():
         row = entry.benchmark_for(device, packet_size_bytes)
-        scaled_throughputs[name] = scale_throughput(row.throughput_enc_mbps, device.clock_speed_mhz, entry.name, device.word_bits)
-        scaled_latencies[name] = scale_time(row.effective_latency_us, device.clock_speed_mhz, entry.name, device.word_bits)
-        scaled_setups[name] = scale_time(entry.setup_us, device.clock_speed_mhz, entry.name, device.word_bits)
+        scaled_throughputs[name] = scale_throughput(row.throughput_enc_mbps, device.clock_speed_mhz, entry.name, device)
+        scaled_latencies[name] = scale_time(row.effective_latency_us, device.clock_speed_mhz, entry.name, device)
+        scaled_setups[name] = scale_time(entry.setup_us, device.clock_speed_mhz, entry.name, device)
 
     t_fit = throughput_fit(cipher_entry, device, packet_size_bytes, context.throughput_required, scaled_throughputs)
     l_fit = latency_fit(cipher_entry, device, packet_size_bytes, context.latency_tolerance, scaled_latencies)
