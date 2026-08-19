@@ -405,13 +405,7 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
         double thr_enc_mbps = (mean_enc_ms > 0) ? (data_mbits / (mean_enc_ms / 1000.0)) : 0.0;
         double thr_dec_mbps = (mean_dec_ms > 0) ? (data_mbits / (mean_dec_ms / 1000.0)) : 0.0;
 
-        double latency_us = 0.0;
-        int has_block_layer = L1->is_block_cipher || L2->is_block_cipher;
-        if (has_block_layer) {
-            int block_size = L1->is_block_cipher ? L1->block_size : L2->block_size;
-            size_t n_blocks = (data_size + block_size - 1) / block_size;
-            latency_us = (mean_enc_ms * 1000.0) / (double)n_blocks;
-        }
+        double latency_us =(mean_enc_ms * 1000.0) / (double)data_size;
 
         enc_means[r] = mean_enc_ms;
         dec_means[r] = mean_dec_ms;
@@ -433,7 +427,7 @@ static result_t run_combo(cascade_t *casc, size_entry_t *sz) {
     res.dec_ms = median(dec_means, outer_repeats);
     res.thr_enc_mbps = median(thr_enc_means, outer_repeats);
     res.thr_dec_mbps = median(thr_dec_means, outer_repeats);
-    res.latency_us = (L1->is_block_cipher || L2->is_block_cipher) ? median(lat_means, outer_repeats) : NAN;
+    res.latency_us = median(lat_means, outer_repeats);
     res.mem_enc_peak_kb = median(mem_enc_peaks, outer_repeats);
     res.mem_dec_peak_kb = median(mem_dec_peaks, outer_repeats);
     res.mem_enc_overhead_kb = median(mem_enc_ovhs, outer_repeats);
@@ -530,24 +524,19 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            int has_block_layer = CASCADES[c].layer1->is_block_cipher || CASCADES[c].layer2->is_block_cipher;
-
-            if (has_block_layer) {
-                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-                        CASCADES[c].pair_name, SIZES[s].label,
-                        res.enc_ms, res.dec_ms,
-                        res.thr_enc_mbps, res.thr_dec_mbps,
-                        res.latency_us,
-                        res.mem_enc_peak_kb, res.mem_enc_overhead_kb,
-                        res.mem_dec_peak_kb, res.mem_dec_overhead_kb);
-            } else {
-                fprintf(csv, "%s,%s,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f,%.4f,%.4f\n",
-                        CASCADES[c].pair_name, SIZES[s].label,
-                        res.enc_ms, res.dec_ms,
-                        res.thr_enc_mbps, res.thr_dec_mbps,
-                        res.mem_enc_peak_kb, res.mem_enc_overhead_kb,
-                        res.mem_dec_peak_kb, res.mem_dec_overhead_kb);
-            }
+            fprintf(csv,
+                "%s,%s,%.4f,%.4f,%.4f,%.4f,%.8f,%.4f,%.4f,%.4f,%.4f\n",
+                CASCADES[c].pair_name,
+                SIZES[s].label,
+                res.enc_ms,
+                res.dec_ms,
+                res.thr_enc_mbps,
+                res.thr_dec_mbps,
+                res.latency_us,
+                res.mem_enc_peak_kb,
+                res.mem_enc_overhead_kb,
+                res.mem_dec_peak_kb,
+                res.mem_dec_overhead_kb);
 
             fflush(csv);
 

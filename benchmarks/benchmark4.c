@@ -536,11 +536,7 @@ static result_t run_combo_single(algo_t *algo, size_entry_t *sz) {
         double thr_enc_mbps = (mean_enc_ms > 0) ? (data_mbits / (mean_enc_ms / 1000.0)) : 0.0;
         double thr_dec_mbps = (mean_dec_ms > 0) ? (data_mbits / (mean_dec_ms / 1000.0)) : 0.0;
 
-        double latency_us = 0.0;
-        if (algo->is_block_cipher) {
-            size_t n_blocks = (data_size + algo->block_size - 1) / algo->block_size;
-            latency_us = (mean_enc_ms * 1000.0) / (double)n_blocks;
-        }
+        double latency_us =(mean_enc_ms * 1000.0) / (double)data_size;
 
         enc_means[r] = mean_enc_ms;
         dec_means[r] = mean_dec_ms;
@@ -562,7 +558,7 @@ static result_t run_combo_single(algo_t *algo, size_entry_t *sz) {
     res.dec_ms = median(dec_means, outer_repeats);
     res.thr_enc_mbps = median(thr_enc_means, outer_repeats);
     res.thr_dec_mbps = median(thr_dec_means, outer_repeats);
-    res.latency_us = algo->is_block_cipher ? median(lat_means, outer_repeats) : NAN;
+    res.latency_us = median(lat_means, outer_repeats);
     res.mem_enc_peak_kb = median(mem_enc_peaks, outer_repeats);
     res.mem_dec_peak_kb = median(mem_dec_peaks, outer_repeats);
     res.mem_enc_overhead_kb = median(mem_enc_ovhs, outer_repeats);
@@ -652,13 +648,7 @@ static result_t run_combo_cascade(cascade_t *casc, size_entry_t *sz) {
         double thr_enc_mbps = (mean_enc_ms > 0) ? (data_mbits / (mean_enc_ms / 1000.0)) : 0.0;
         double thr_dec_mbps = (mean_dec_ms > 0) ? (data_mbits / (mean_dec_ms / 1000.0)) : 0.0;
 
-        double latency_us = 0.0;
-        int has_block_layer = L1->is_block_cipher || L2->is_block_cipher;
-        if (has_block_layer) {
-            int block_size = L1->is_block_cipher ? L1->block_size : L2->block_size;
-            size_t n_blocks = (data_size + block_size - 1) / block_size;
-            latency_us = (mean_enc_ms * 1000.0) / (double)n_blocks;
-        }
+        double latency_us =(mean_enc_ms * 1000.0) / (double)data_size;
 
         enc_means[r] = mean_enc_ms;
         dec_means[r] = mean_dec_ms;
@@ -680,7 +670,7 @@ static result_t run_combo_cascade(cascade_t *casc, size_entry_t *sz) {
     res.dec_ms = median(dec_means, outer_repeats);
     res.thr_enc_mbps = median(thr_enc_means, outer_repeats);
     res.thr_dec_mbps = median(thr_dec_means, outer_repeats);
-    res.latency_us = (L1->is_block_cipher || L2->is_block_cipher) ? median(lat_means, outer_repeats) : NAN;
+    res.latency_us = median(lat_means, outer_repeats);
     res.mem_enc_peak_kb = median(mem_enc_peaks, outer_repeats);
     res.mem_dec_peak_kb = median(mem_dec_peaks, outer_repeats);
     res.mem_enc_overhead_kb = median(mem_enc_ovhs, outer_repeats);
@@ -776,16 +766,7 @@ static result_t run_combo_cascade3(cascade3_t *casc, size_entry_t *sz) {
         double thr_enc_mbps = (mean_enc_ms > 0) ? (data_mbits / (mean_enc_ms / 1000.0)) : 0.0;
         double thr_dec_mbps = (mean_dec_ms > 0) ? (data_mbits / (mean_dec_ms / 1000.0)) : 0.0;
 
-        /* All three layers here are block ciphers (AES-256/AES-128) or
-         * ChaCha20 (stream); use the smallest block-cipher block size. */
-        int has_block_layer = L1->is_block_cipher || L2->is_block_cipher || L3->is_block_cipher;
-        double latency_us = 0.0;
-        if (has_block_layer) {
-            int block_size = L1->is_block_cipher ? L1->block_size :
-                              (L2->is_block_cipher ? L2->block_size : L3->block_size);
-            size_t n_blocks = (data_size + block_size - 1) / block_size;
-            latency_us = (mean_enc_ms * 1000.0) / (double)n_blocks;
-        }
+        double latency_us =(mean_enc_ms * 1000.0) / (double)data_size;
 
         enc_means[r] = mean_enc_ms;
         dec_means[r] = mean_dec_ms;
@@ -829,33 +810,36 @@ static result_t run_combo_cascade3(cascade3_t *casc, size_entry_t *sz) {
  * entry at all (e.g. RECTANGLE and RECTANGLE+HIGHT, which have neither AES
  * nor ChaCha20) prints NA rather than 0/1. */
 static void write_row(FILE *csv, const char *name, const char *size_label,
-                       result_t *res, int has_block_layer,
-                       int has_aes, int has_chacha,
-                       int pass_aes_hw, int pass_chacha_hw) {
+                      result_t *res, int has_block_layer,
+                      int has_aes, int has_chacha,
+                      int pass_aes_hw, int pass_chacha_hw) {
     char aes_field[4], chacha_field[4];
-    if (has_aes) snprintf(aes_field, sizeof(aes_field), "%d", pass_aes_hw);
-    else snprintf(aes_field, sizeof(aes_field), "NA");
-    if (has_chacha) snprintf(chacha_field, sizeof(chacha_field), "%d", pass_chacha_hw);
-    else snprintf(chacha_field, sizeof(chacha_field), "NA");
 
-    if (has_block_layer) {
-        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%s,%s\n",
-                name, size_label,
-                res->enc_ms, res->dec_ms,
-                res->thr_enc_mbps, res->thr_dec_mbps,
-                res->latency_us,
-                res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb,
-                aes_field, chacha_field);
-    } else {
-        fprintf(csv, "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,NA,%.4f,%.4f,%.4f,%.4f,%s,%s\n",
-                name, size_label,
-                res->enc_ms, res->dec_ms,
-                res->thr_enc_mbps, res->thr_dec_mbps,
-                res->mem_enc_peak_kb, res->mem_enc_overhead_kb,
-                res->mem_dec_peak_kb, res->mem_dec_overhead_kb,
-                aes_field, chacha_field);
-    }
+    if (has_aes)
+        snprintf(aes_field, sizeof(aes_field), "%d", pass_aes_hw);
+    else
+        snprintf(aes_field, sizeof(aes_field), "NA");
+
+    if (has_chacha)
+        snprintf(chacha_field, sizeof(chacha_field), "%d", pass_chacha_hw);
+    else
+        snprintf(chacha_field, sizeof(chacha_field), "NA");
+
+    fprintf(csv,
+        "%s,%s,NA,%.4f,%.4f,%.4f,%.4f,%.8f,%.4f,%.4f,%.4f,%.4f,%s,%s\n",
+        name,
+        size_label,
+        res->enc_ms,
+        res->dec_ms,
+        res->thr_enc_mbps,
+        res->thr_dec_mbps,
+        res->latency_us,
+        res->mem_enc_peak_kb,
+        res->mem_enc_overhead_kb,
+        res->mem_dec_peak_kb,
+        res->mem_dec_overhead_kb,
+        aes_field,
+        chacha_field);
 }
 
 /* filter_name == NULL runs every single + every cascade (the BOTH_OFF
