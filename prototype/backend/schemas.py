@@ -10,7 +10,7 @@ class ProfileCreate(BaseModel):
     cpu_architecture: str
     clock_speed: float | None = None
     core_count: int | None = None
-    ram_size: int | None = None
+    ram_size: float | None = None
     battery_powered: bool | None = None
     hw_accel_aes_ni: bool | None = None
     hw_accel_simd_presence: bool | None = None         # NEW

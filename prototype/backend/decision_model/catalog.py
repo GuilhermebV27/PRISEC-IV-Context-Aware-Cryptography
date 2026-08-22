@@ -230,6 +230,15 @@ class CipherEntry:
     # ALL measured acceleration variants: {(aes_flag, simd_flag): {size_bytes: BenchmarkRow}}
     # flags are strings matching the CSV exactly: "1"/"0"/"NA"
     variants: dict = field(default_factory=dict)
+    # Caches for the fitted models below, keyed by (hw_accel_aes_ni,
+    # hw_accel_simd_best_tier) - the ONLY device fields that affect which
+    # variant's data gets used (word_bits/clock/ram don't). Since CipherEntry
+    # instances live inside the globally-cached catalog (decision_model.py's
+    # _CATALOG), these caches persist across requests too, not just within
+    # one decide() call - a real fix for repeated re-fitting on every access.
+    _time_model_cache: dict = field(default_factory=dict, repr=False, compare=False)
+    _memory_model_cache: dict = field(default_factory=dict, repr=False, compare=False)
+    _energy_model_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def closest_size(self, benchmarks: dict, target_bytes: int) -> Optional[BenchmarkRow]:
         if not benchmarks:
@@ -250,11 +259,59 @@ class CipherEntry:
         # Fallback: desired combo not measured (shouldn't happen for the 27
         # catalog entries, verified against the full checklist) - use
         # whatever variant IS available, preferring the most-accelerated one.
+        # Logged loudly rather than failing silently, since this means a
+        # device's exact hardware state has no matching benchmark data -
+        # worth knowing if it ever actually triggers.
+        import sys
+        print(f"[catalog] WARNING: '{self.name}' has no benchmark data for accel state {desired} - "
+              f"falling back to a different measured variant. This should not happen for the current "
+              f"27-entry catalog; check CIPHER_ACCEL_FAMILY / benchmarks_full.csv for a gap.", file=sys.stderr)
         for combo in sorted(self.variants.keys(), key=lambda c: c.count("1"), reverse=True):
             row = self.closest_size(self.variants[combo], target_bytes)
             if row is not None:
                 return row
         raise ValueError(f"No benchmark data at all for '{self.name}'")
+
+    def estimate_time_ms(self, device) -> "TimeModel":
+        """
+        Returns a TimeModel carrying every REAL benchmarked (size, enc_ms)
+        point for this cipher at the device's matching hardware variant,
+        plus a global extrapolation fit (fixed_ms + slope*bytes, from the
+        two smallest real points) for sizes outside the sampled range. See
+        TimeModel.estimate() for how these get used depending on where the
+        target size falls.
+
+        throughput_enc_mbps and latency_us (per-byte) are always DERIVED
+        from whichever enc_ms estimate/measurement applies, not
+        independently curve-fit - keeps all three metrics mutually
+        consistent (they're definitionally related: throughput=bytes/time,
+        latency=time/bytes). Confirmed against real data: reversing the
+        formulas from an actual benchmarked row (bytes*8/(enc_ms/1000)/1e6
+        for throughput, enc_ms*1000/bytes for latency) reproduces the
+        recorded values within the rounding noise of the 4-decimal enc_ms
+        column - confirms these ARE how the real values were computed.
+        """
+        desired = desired_accel_flags(self.name, device)
+        if desired in self._time_model_cache:
+            return self._time_model_cache[desired]
+
+        by_size = self.variants.get(desired) or next(iter(self.variants.values()), {})
+        sizes = sorted(by_size.keys())
+        enc_ms_by_size = {s: by_size[s].enc_ms for s in sizes}
+
+        if len(sizes) < 2:
+            only = by_size[sizes[0]] if sizes else None
+            model = TimeModel(fixed_ms=only.enc_ms if only else 0.0, slope=0.0,
+                               sizes=sizes, enc_ms_by_size=enc_ms_by_size)
+        else:
+            s1, s2 = sizes[0], sizes[1]
+            e1, e2 = enc_ms_by_size[s1], enc_ms_by_size[s2]
+            slope = (e2 - e1) / (s2 - s1)
+            fixed_ms = e1 - slope * s1
+            model = TimeModel(fixed_ms=fixed_ms, slope=slope, sizes=sizes, enc_ms_by_size=enc_ms_by_size)
+
+        self._time_model_cache[desired] = model
+        return model
 
     def estimate_memory_kb(self, device) -> "MemoryModel":
         """
@@ -274,17 +331,61 @@ class CipherEntry:
         wrongly excluded on a 1MB-RAM device).
         """
         desired = desired_accel_flags(self.name, device)
+        if desired in self._memory_model_cache:
+            return self._memory_model_cache[desired]
+
         by_size = self.variants.get(desired) or next(iter(self.variants.values()), {})
         sizes = sorted(by_size.keys())
         if len(sizes) < 2:
             only = by_size[sizes[0]] if sizes else None
-            return MemoryModel(fixed_kb=only.memory_enc_peak_kb if only else 0.0, slope=0.0)
+            model = MemoryModel(fixed_kb=only.memory_enc_peak_kb if only else 0.0, slope=0.0)
+        else:
+            s1, s2 = sizes[0], sizes[1]
+            p1, p2 = by_size[s1].memory_enc_peak_kb, by_size[s2].memory_enc_peak_kb
+            slope = (p2 - p1) / (s2 - s1)
+            fixed_kb = p1 - slope * s1
+            model = MemoryModel(fixed_kb=fixed_kb, slope=slope)
 
-        s1, s2 = sizes[0], sizes[1]
-        p1, p2 = by_size[s1].memory_enc_peak_kb, by_size[s2].memory_enc_peak_kb
-        slope = (p2 - p1) / (s2 - s1)
-        fixed_kb = p1 - slope * s1
-        return MemoryModel(fixed_kb=fixed_kb, slope=slope)
+        self._memory_model_cache[desired] = model
+        return model
+
+    def estimate_energy_mah(self, device) -> "EnergyModel":
+        """
+        Same linear-fit technique as estimate_memory_kb/estimate_time_ms,
+        applied to battery_usage_mah - fixes a real gap found in review:
+        energy_fit() was still using plain closest-match (via
+        benchmark_for()) for energy, unlike memory and time/throughput/
+        latency, which already got this treatment. An in-between packet
+        size (e.g. 25MB) was silently rounding to whichever real row was
+        numerically closest, instead of being properly estimated.
+
+        Returns None if no real energy data exists for this cipher/device
+        variant at all (e.g. non-battery-relevant catalog gaps) - callers
+        should treat that as "energy unavailable", same as before.
+        """
+        desired = desired_accel_flags(self.name, device)
+        if desired in self._energy_model_cache:
+            return self._energy_model_cache[desired]
+
+        by_size = self.variants.get(desired) or next(iter(self.variants.values()), {})
+        sizes_with_energy = sorted(s for s, row in by_size.items() if row.energy_mah is not None)
+
+        if not sizes_with_energy:
+            self._energy_model_cache[desired] = None
+            return None
+
+        if len(sizes_with_energy) < 2:
+            only_size = sizes_with_energy[0]
+            model = EnergyModel(fixed_mah=by_size[only_size].energy_mah, slope=0.0)
+        else:
+            s1, s2 = sizes_with_energy[0], sizes_with_energy[1]
+            m1, m2 = by_size[s1].energy_mah, by_size[s2].energy_mah
+            slope = (m2 - m1) / (s2 - s1)
+            fixed_mah = m1 - slope * s1
+            model = EnergyModel(fixed_mah=fixed_mah, slope=slope)
+
+        self._energy_model_cache[desired] = model
+        return model
 
 
 @dataclass
@@ -294,6 +395,93 @@ class MemoryModel:
 
     def estimate(self, target_bytes: int) -> float:
         return self.fixed_kb + self.slope * target_bytes
+
+
+@dataclass
+class EnergyModel:
+    fixed_mah: float
+    slope: float  # mAh per byte of packet size
+
+    def estimate(self, target_bytes: int) -> float:
+        return max(self.fixed_mah + self.slope * target_bytes, 0.0)
+
+
+@dataclass
+class TimeEstimate:
+    enc_ms: float
+    throughput_enc_mbps: float
+    latency_us: float          # per-byte, matching the benchmark suite's current convention
+    below_min_sample: bool     # True only for genuine extrapolation below the smallest real
+                                # benchmarked size (1KB) - lower confidence, flagged explicitly
+    interpolated: bool         # True when the target sits strictly between two real sampled
+                                # sizes (bracket-average interpolation used, not extrapolation)
+
+
+@dataclass
+class TimeModel:
+    fixed_ms: float
+    slope: float                  # ms of encryption time per byte - used ONLY for extrapolation
+                                    # outside the sampled range (below the smallest, or above the
+                                    # largest, real benchmarked size)
+    sizes: list                   # every real benchmarked size (bytes), sorted ascending
+    enc_ms_by_size: dict           # {size_bytes: real measured enc_ms} for every sampled size
+
+    def _enc_ms_for(self, target_bytes: int) -> tuple:
+        """Returns (enc_ms, below_min_sample, interpolated)."""
+        if not self.sizes:
+            return max(self.fixed_ms + self.slope * target_bytes, 1e-12), False, False
+
+        if target_bytes in self.enc_ms_by_size:
+            # exact match to a real sampled point - use the real value directly, no estimation
+            return self.enc_ms_by_size[target_bytes], False, False
+
+        if target_bytes < self.sizes[0]:
+            # extrapolation below the smallest real sample - global 2-point fit, flagged
+            return max(self.fixed_ms + self.slope * target_bytes, 1e-12), True, False
+
+        if target_bytes > self.sizes[-1]:
+            # extrapolation above the largest real sample: pure proportional scaling
+            # from the largest real point (NOT the global fixed+slope fit, which is
+            # anchored to the two SMALLEST points and represents the RISING part of
+            # the curve, not the already-flat part). Consequence worth noting: since
+            # enc_ms and size scale by the same ratio here, throughput = size/enc_ms
+            # comes out EXACTLY constant beyond the sampled range - the model holds
+            # the plateau value flat rather than continuing to model a diminishing
+            # fixed-cost effect that's already negligible by 50MB.
+            s_max = self.sizes[-1]
+            e_max = self.enc_ms_by_size[s_max]
+            return max(e_max * (target_bytes / s_max), 1e-12), False, False
+
+        # genuine interpolation: target sits strictly between two real sampled sizes.
+        # Bracket it with the nearest real point below and above, estimate enc_ms
+        # proportionally from EACH bracketing point independently (assumes enc_ms
+        # scales linearly with size locally, i.e. no fixed-cost component within
+        # this narrow bracket), then average the two estimates. E.g. for a target
+        # exactly between 10MB and 50MB: one estimate scales the 10MB value UP by
+        # the size ratio, the other scales the 50MB value DOWN by the size ratio;
+        # the final estimate is their midpoint - deliberately different from (and
+        # more locally accurate than) the global fixed+slope extrapolation model,
+        # which is anchored to the two SMALLEST points and not meant to represent
+        # the curve's local shape far from them.
+        s_lo = max(s for s in self.sizes if s < target_bytes)
+        s_hi = min(s for s in self.sizes if s > target_bytes)
+        e_lo, e_hi = self.enc_ms_by_size[s_lo], self.enc_ms_by_size[s_hi]
+        estimate_from_lo = e_lo * (target_bytes / s_lo)
+        estimate_from_hi = e_hi * (target_bytes / s_hi)
+        enc_ms = (estimate_from_lo + estimate_from_hi) / 2
+        return max(enc_ms, 1e-12), False, True
+
+    def estimate(self, target_bytes: int) -> TimeEstimate:
+        enc_ms, below_min_sample, interpolated = self._enc_ms_for(target_bytes)
+        throughput_mbps = (target_bytes * 8) / (enc_ms / 1000) / 1e6
+        latency_us_per_byte = (enc_ms * 1000) / target_bytes if target_bytes > 0 else 0.0
+        return TimeEstimate(
+            enc_ms=enc_ms,
+            throughput_enc_mbps=throughput_mbps,
+            latency_us=latency_us_per_byte,
+            below_min_sample=below_min_sample,
+            interpolated=interpolated,
+        )
 
 
 def _load_consolidated(path: str) -> dict:

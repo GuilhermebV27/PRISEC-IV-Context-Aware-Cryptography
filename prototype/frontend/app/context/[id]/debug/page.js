@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Shield, Sliders, ArrowLeftRight } from "lucide-react";
 import { getProfile } from "../../../lib/api";
+import { loadContextState, saveContextState } from "../../../lib/contextState";
 
 const SECURITY_LEVELS = ["Guest", "Basic", "Advanced", "Admin"];
 const CONFIDENTIALITY_LEVELS = ["Low", "Medium", "High"];
@@ -98,6 +99,29 @@ export default function ContextPage() {
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  // Restore any context/weights the user already entered - either on this
+  // page or on the normal context page, since they share the same storage key.
+  useEffect(() => {
+    const saved = loadContextState(id);
+    if (saved) {
+      if (saved.form) setForm(saved.form);
+      if (saved.weights) setWeights(saved.weights);
+    }
+  }, [id]);
+
+  // Persist on every change so switching out of Debug Mode and back doesn't lose anything.
+  // Skips its own FIRST run - see the matching comment in context/[id]/page.js for why:
+  // without this, the save effect would clobber the just-restored state with stale
+  // pre-restore defaults on every single mount.
+  const isFirstSaveRef = useRef(true);
+  useEffect(() => {
+    if (isFirstSaveRef.current) {
+      isFirstSaveRef.current = false;
+      return;
+    }
+    saveContextState(id, { form, weights });
+  }, [id, form, weights]);
 
   useEffect(() => {
     getProfile(id)
@@ -451,7 +475,7 @@ export default function ContextPage() {
               <div className="border-t border-white/10 mt-4 pt-3 flex justify-between items-center">
                 <button
                   type="button"
-                  onClick={() => router.back()}
+                  onClick={() => router.push("/profiles")}
                   className="px-5 py-2 border border-white/15 rounded-md text-sm text-[#c7c7c7] hover:bg-white/5 transition"
                 >
                   Back

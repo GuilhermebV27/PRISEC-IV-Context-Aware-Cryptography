@@ -37,7 +37,7 @@ class Device:
     word_bits: int
     battery_powered: bool
     hw_accel_aes_ni: bool
-    hw_accel_simd_best_tier: str  # "scalar"/"ssse3"/"avx2"/"avx512"/"neon"/"sve"
+    hw_accel_simd_best_tier: Optional[str]  # None (no SIMD) / "ssse3"/"avx2"/"avx512"/"neon"/"sve"
     duty_cycle: str  # needed here too, since device_fit's energy_fit weighting depends on it
 
 
@@ -73,8 +73,8 @@ def decide(device: Device, context: Context, weights: Optional[dict] = None) -> 
             "infeasible": True,
             "reason": f"Packet size ({context.packet_size_bytes} bytes) exceeds the maximum "
                       f"supported size ({MAX_SUPPORTED_PACKET_SIZE_BYTES} bytes / 100MB). The largest "
-                      f"benchmarked packet size is 50MB - beyond 100MB, the closest-match approximation "
-                      f"would be extrapolating too far from any real measurement to trust.",
+                      f"benchmarked packet size is 50MB - beyond 100MB, proportional extrapolation from "
+                      f"the 50MB measurement is too far past any real data to trust.",
             "weights_used": weights,
         }
 
@@ -120,8 +120,21 @@ def decide(device: Device, context: Context, weights: Optional[dict] = None) -> 
     best_score = max(r["final_score"] for r in results.values())
     tied_winners = [name for name, r in results.items() if abs(r["final_score"] - best_score) < 1e-9]
 
+    if len(tied_winners) > 1:
+        # Exact ties are broken by security_strength (highest wins) rather
+        # than returning every tied cipher - a deliberate, deterministic
+        # tiebreaker, not an arbitrary pick. If security_strength ALSO ties
+        # (rare - would need two ciphers with identical final_score AND
+        # identical security_strength), the remaining tied set is returned
+        # as-is, since there's no further rule to break it by.
+        best_strength = max(feasible[name].security_strength for name in tied_winners)
+        tied_winners = [name for name in tied_winners
+                        if abs(feasible[name].security_strength - best_strength) < 1e-9]
+
     return {
-        "recommended_ciphers": tied_winners,   # list - may contain more than one on an exact tie
+        "recommended_ciphers": tied_winners,   # list - normally a single winner; may still
+                                                 # contain more than one if security_strength
+                                                 # also ties after the primary tiebreaker
         "infeasible": False,
         "excluded_for_memory": sorted(set(catalog) - set(feasible)),
         "requirement": requirement,

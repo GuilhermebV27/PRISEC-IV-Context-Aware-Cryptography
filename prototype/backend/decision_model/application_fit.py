@@ -78,24 +78,32 @@ def latency_fit(cipher_entry, device, packet_size_bytes: int, latency_tolerance:
     return _capped_fit(normalized_offer, requirement)
 
 
-def setup_fit(cipher_entry, candidate_scaled_setups: dict) -> float:
-    """Uncapped - fastest (normalized) setup among candidates wins outright.
-    candidate_scaled_setups: {cipher_name: scaled_setup_us}."""
-    values = list(candidate_scaled_setups.values())
-    lo, hi = min(values), max(values)
-    raw = candidate_scaled_setups[cipher_entry.name]
-    if hi == lo:
-        return 0.5
-    return 1 - (raw - lo) / (hi - lo)
+def setup_fit(amort: float) -> float:
+    """Self-referential, NOT peer-relative (fixed from an earlier bug):
+    setup_fit = 1 - amortization_factor, matching how w_setup_effective is
+    already computed (also self-referential, via amortization_factor). The
+    original peer-relative version (normalized against other candidates in
+    the pool) let an expensive ECC cipher's setup_fit look decent just
+    because OTHER slow-setup candidates were also in the pool, even while
+    its own amortization_factor (and therefore its weight) correctly
+    marked it as setup-dominated - producing a large weight on a
+    not-actually-bad score, the opposite of what should happen. Using the
+    same self-referential basis for both the weight and the score fixes
+    this: a cipher whose setup genuinely dominates its own workload now
+    gets penalized on setup_fit itself, not just weighted more without
+    being scored worse."""
+    return 1 - amort
 
 
 def amortization_factor(cipher_entry, device, packet_size_bytes: int) -> float:
     """setup_time / (setup_time + encryption_time), both scaled for this
-    device, at this packet size. This is the MEASURED share of total work
-    that setup represents - not modeled/estimated."""
-    row = cipher_entry.benchmark_for(device, packet_size_bytes)
+    device, at this packet size. encryption_time comes from the fitted
+    TimeModel (estimate_time_ms), not a closest-match row - see
+    CipherEntry.estimate_time_ms for why."""
+    time_model = cipher_entry.estimate_time_ms(device)
+    estimate = time_model.estimate(packet_size_bytes)
     scaled_setup_us = scale_time(cipher_entry.setup_us, device.clock_speed_mhz, cipher_entry.name, device)
-    scaled_enc_us = scale_time(row.enc_ms * 1000, device.clock_speed_mhz, cipher_entry.name, device)
+    scaled_enc_us = scale_time(estimate.enc_ms * 1000, device.clock_speed_mhz, cipher_entry.name, device)
     total = scaled_setup_us + scaled_enc_us
     if total == 0:
         return 0.0
@@ -113,18 +121,20 @@ def application_fit(cipher_entry, device, packet_size_bytes: int, context,
     base_weights = DUTY_CYCLE_WEIGHTS[context.duty_cycle]
 
     # Build normalization pools across all candidates, scaled for this device
-    scaled_throughputs, scaled_latencies, scaled_setups = {}, {}, {}
+    # (throughput/latency stay peer-relative - only setup_fit changed to
+    # self-referential, see setup_fit's docstring). Both now come from each
+    # candidate's fitted TimeModel, not a closest-match benchmark row.
+    scaled_throughputs, scaled_latencies = {}, {}
     for name, entry in candidate_entries.items():
-        row = entry.benchmark_for(device, packet_size_bytes)
-        scaled_throughputs[name] = scale_throughput(row.throughput_enc_mbps, device.clock_speed_mhz, entry.name, device)
-        scaled_latencies[name] = scale_time(row.effective_latency_us, device.clock_speed_mhz, entry.name, device)
-        scaled_setups[name] = scale_time(entry.setup_us, device.clock_speed_mhz, entry.name, device)
+        estimate = entry.estimate_time_ms(device).estimate(packet_size_bytes)
+        scaled_throughputs[name] = scale_throughput(estimate.throughput_enc_mbps, device.clock_speed_mhz, entry.name, device)
+        scaled_latencies[name] = scale_time(estimate.latency_us, device.clock_speed_mhz, entry.name, device)
 
     t_fit = throughput_fit(cipher_entry, device, packet_size_bytes, context.throughput_required, scaled_throughputs)
     l_fit = latency_fit(cipher_entry, device, packet_size_bytes, context.latency_tolerance, scaled_latencies)
-    s_fit = setup_fit(cipher_entry, scaled_setups)
 
     amort = amortization_factor(cipher_entry, device, packet_size_bytes)
+    s_fit = setup_fit(amort)
     w_setup_eff = base_weights["setup"] * amort
     freed = base_weights["setup"] - w_setup_eff
     w_throughput_eff = base_weights["throughput"] + freed / 2
@@ -132,11 +142,19 @@ def application_fit(cipher_entry, device, packet_size_bytes: int, context,
 
     score = w_throughput_eff * t_fit + w_latency_eff * l_fit + w_setup_eff * s_fit
 
+    time_estimate = cipher_entry.estimate_time_ms(device).estimate(packet_size_bytes)
+    below_min_sample = time_estimate.below_min_sample
+    interpolated = time_estimate.interpolated
+
     return {
         "score": score,
         "breakdown": {
             "throughput_fit": t_fit, "latency_fit": l_fit, "setup_fit": s_fit,
             "amortization_factor": amort,
             "weights_effective": {"throughput": w_throughput_eff, "latency": w_latency_eff, "setup": w_setup_eff},
+            "below_min_sample": below_min_sample,  # True = packet size is below the smallest real
+                                                     # benchmark (1KB) - lower confidence, extrapolated
+            "interpolated": interpolated,  # True = packet size sits between two real benchmarked
+                                             # sizes - bracket-averaged, not extrapolated
         },
     }

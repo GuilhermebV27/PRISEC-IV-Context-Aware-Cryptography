@@ -59,12 +59,18 @@ def energy_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict)
     device's actual hardware state and this packet size - lower energy ->
     higher fit. Returns None if energy data isn't available for this
     cipher/device/size combination (caller falls back to non-battery weighting).
+
+    Uses the linear-fit energy estimate (catalog.CipherEntry.estimate_energy_mah),
+    not a closest-match row - fixes a real gap: this used to round an
+    in-between packet size (e.g. 25MB) to whichever real benchmarked size
+    was numerically closest, unlike memory and time/throughput/latency,
+    which already got the proper linear-fit treatment.
     """
     catalog_values = {}
     for name, entry in full_catalog.items():
-        row = entry.benchmark_for(device, packet_size_bytes)
-        if row.energy_mah is not None:
-            catalog_values[name] = row.energy_mah
+        model = entry.estimate_energy_mah(device)
+        if model is not None:
+            catalog_values[name] = model.estimate(packet_size_bytes)
 
     if cipher_entry.name not in catalog_values or not catalog_values:
         return None
@@ -83,7 +89,6 @@ def device_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict 
     full_catalog is needed for energy_fit's catalog-wide normalization -
     pass the same catalog dict decision_model.py already has loaded.
     """
-    row = cipher_entry.benchmark_for(device, packet_size_bytes)
     device_ram_kb = device.ram_size_mb * 1024  # ram_size stored in MB per the profile schema
 
     estimated_memory_kb = cipher_entry.estimate_memory_kb(device).estimate(packet_size_bytes)

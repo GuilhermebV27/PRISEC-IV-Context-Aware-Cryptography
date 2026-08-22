@@ -109,7 +109,7 @@ def create_decision(request: schemas.DecisionRequest, db: Session = Depends(get_
         db_decision = models.Decision(
             profile_id=request.profile_id,
             context_json=request.context.model_dump_json(),
-            recommended_cipher=",".join(result["recommended_ciphers"]) if result["recommended_ciphers"] else "",
+            recommended_cipher=json.dumps(result["recommended_ciphers"]),
             decision_metadata=json.dumps({
                 "infeasible": result["infeasible"],
                 "reason": result.get("reason"),

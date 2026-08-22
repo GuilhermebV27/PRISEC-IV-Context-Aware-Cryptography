@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Shield, Sliders, FlaskConical } from "lucide-react";
 import { getProfile } from "../../lib/api";
+import { loadContextState, saveContextState } from "../../lib/contextState";
 
 const SECURITY_LEVELS = ["Guest", "Basic", "Advanced", "Admin"];
 const CONFIDENTIALITY_LEVELS = ["Low", "Medium", "High"];
@@ -98,6 +99,31 @@ export default function ContextPage() {
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  // Restore any context/weights the user already entered - either on this
+  // page or on the debug page, since they share the same storage key.
+  useEffect(() => {
+    const saved = loadContextState(id);
+    if (saved) {
+      if (saved.form) setForm(saved.form);
+      if (saved.weights) setWeights(saved.weights);
+    }
+  }, [id]);
+
+  // Persist on every change so switching to Debug Mode and back doesn't lose anything.
+  // Skips its own FIRST run: on mount, this effect and the restore effect above both
+  // fire in the same pass, but setForm/setWeights from the restore haven't been
+  // applied yet (state updates aren't synchronous) - without this guard, the very
+  // first save would silently write the stale pre-restore defaults right back over
+  // whatever was actually saved, defeating the restore every time.
+  const isFirstSaveRef = useRef(true);
+  useEffect(() => {
+    if (isFirstSaveRef.current) {
+      isFirstSaveRef.current = false;
+      return;
+    }
+    saveContextState(id, { form, weights });
+  }, [id, form, weights]);
 
   useEffect(() => {
     getProfile(id)
@@ -445,7 +471,7 @@ export default function ContextPage() {
               <div className="border-t border-white/10 mt-4 pt-3 flex justify-between items-center">
                 <button
                   type="button"
-                  onClick={() => router.back()}
+                  onClick={() => router.push("/profiles")}
                   className="px-5 py-2 border border-white/15 rounded-md text-sm text-[#c7c7c7] hover:bg-white/5 transition"
                 >
                   Back

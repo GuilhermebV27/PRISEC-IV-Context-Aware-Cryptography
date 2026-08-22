@@ -21,7 +21,7 @@ class Profile(Base):
     cpu_architecture = Column(String(50), nullable=False)
     clock_speed = Column(Float)
     core_count = Column(Integer)
-    ram_size = Column(Integer)
+    ram_size = Column(Float)
     battery_powered = Column(Boolean)
     device_tier = Column(Integer)
     hw_accel_aes_ni = Column(Boolean)
@@ -36,7 +36,6 @@ class Decision(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     profile_id = Column(Integer, ForeignKey("profiles.id"), nullable=False)
     context_json = Column(Text, nullable=False)
-    recommended_cipher = Column(String(50), nullable=False)
+    recommended_cipher = Column(String(255), nullable=False)
     decision_metadata = Column(Text, nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
-    
