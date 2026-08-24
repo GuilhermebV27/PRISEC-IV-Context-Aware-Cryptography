@@ -5,18 +5,14 @@ import { useRouter } from "next/navigation";
 import { Shield, Pencil, Check } from "lucide-react";
 import { createProfile } from "../../lib/api";
 import { computeDeviceTier, CPU_OPTIONS } from "../../lib/Devicetier";
+import { RAM_SIZE_OPTIONS, ramKbToMb, snapToNearestRamOption } from "../../lib/ramSizes";
 
 const SIMD_TIER_OPTIONS = ["avx512", "avx2", "sve", "ssse3", "neon"];
 
 const CLOCK_MULTIPLIERS = { kHz: 0.001, MHz: 1, GHz: 1000 }; // → MHz
-const RAM_MULTIPLIERS = { kB: 1 / 1024, MB: 1, GB: 1024 }; // → MB
 
 function normalizeClockToMHz(value, unit) {
   return parseFloat(value) * CLOCK_MULTIPLIERS[unit];
-}
-
-function normalizeRamToMB(value, unit) {
-  return parseFloat(value) * RAM_MULTIPLIERS[unit];
 }
 
 function mapDetectedArch(raw) {
@@ -62,8 +58,7 @@ export default function NewProfilePage() {
     clock_speed: "",
     clock_unit: "MHz",
     core_count: "",
-    ram_size: "",
-    ram_unit: "MB",
+    ram_size_kb: "",
     battery_powered: null,
     hw_accel_aes_ni: null,
     hw_accel_simd_presence: null,
@@ -120,7 +115,7 @@ export default function NewProfilePage() {
     const missing = {
       cpu_architecture: !form.cpu_architecture,
       core_count: !form.core_count,
-      ram_size: !form.ram_size,
+      ram_size: !form.ram_size_kb,
       battery_powered: form.battery_powered === null,
     };
     const hasMissing = Object.values(missing).some(Boolean);
@@ -133,7 +128,7 @@ export default function NewProfilePage() {
     setError(null);
     try {
       const clock_speed = normalizeClockToMHz(form.clock_speed, form.clock_unit);
-      const ram_size = normalizeRamToMB(form.ram_size, form.ram_unit);
+      const ram_size = ramKbToMb(parseFloat(form.ram_size_kb));
       const core_count = parseInt(form.core_count);
 
       const device_tier = computeDeviceTier({
@@ -191,8 +186,7 @@ export default function NewProfilePage() {
         clock_speed: clockDetected ? String(specs.clock_speed_mhz) : prev.clock_speed,
         clock_unit: "MHz",
         core_count: coreDetected ? String(specs.core_count) : prev.core_count,
-        ram_size: ramDetected ? String(specs.ram_size_mb) : prev.ram_size,
-        ram_unit: "MB",
+        ram_size_kb: ramDetected ? String(snapToNearestRamOption(specs.ram_size_mb).kb) : prev.ram_size_kb,
         battery_powered: specs.battery_powered,
         hw_accel_aes_ni: specs.hw_accel_aes_ni,
         hw_accel_simd_presence: specs.hw_accel_simd_presence,
@@ -392,28 +386,25 @@ export default function NewProfilePage() {
               <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
                 RAM CAPACITY <span className="text-red-400">*</span>
               </label>
-              <div className="flex gap-2">
-                <input
-                  type="number"
-                  value={form.ram_size}
-                  onChange={(e) => {
-                    update("ram_size", e.target.value);
-                    clearIssue("ram_size");
-                  }}
-                  className={`flex-1 bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff] ${
-                    fieldIssues.ram_size ? "border-red-500" : "border-white/15"
-                  }`}
-                />
-                <select
-                  value={form.ram_unit}
-                  onChange={(e) => update("ram_unit", e.target.value)}
-                  className="bg-[#0a0a0a] border border-white/15 rounded-md px-3 py-3 text-sm text-[#c7c7c7] focus:outline-none focus:border-[#5b8cff]"
-                >
-                  <option value="kB">kB</option>
-                  <option value="MB">MB</option>
-                  <option value="GB">GB</option>
-                </select>
-              </div>
+              <select
+                value={form.ram_size_kb}
+                onChange={(e) => {
+                  update("ram_size_kb", e.target.value);
+                  clearIssue("ram_size");
+                }}
+                className={`w-full bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm focus:outline-none focus:border-[#5b8cff] ${
+                  fieldIssues.ram_size ? "border-red-500" : "border-white/15"
+                }`}
+              >
+                <option value="" disabled>
+                  Select RAM capacity
+                </option>
+                {RAM_SIZE_OPTIONS.map((opt) => (
+                  <option key={opt.kb} value={opt.kb}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Battery-powered */}
