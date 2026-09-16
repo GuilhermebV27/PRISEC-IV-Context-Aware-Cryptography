@@ -4,15 +4,14 @@ import models
 import psutil
 import schemas
 from database import Base, engine, get_db
+from decision_adapter import build_context, build_device
+from decision_model.decision_model import decide as run_decision
+from decision_model.decision_model import validate_weights
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from hw_detect import best_simd_tier, detect_hw_aes, detect_simd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
-from decision_adapter import build_context, build_device
-from decision_model.decision_model import decide as run_decision
-from decision_model.decision_model import validate_weights
 
 Base.metadata.create_all(bind=engine)
 

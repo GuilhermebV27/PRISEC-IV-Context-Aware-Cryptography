@@ -1,19 +1,12 @@
-"""
-device_fit.py
+"""device_fit(cipher) = memory_fit + word_fit (+ energy_fit if battery-powered)"""
 
-device_fit(cipher) = memory_fit + word_fit (+ energy_fit if battery-powered)
-
-See device-fit.md for the full design rationale.
-"""
+from typing import Optional
 
 import catalog
-from typing import Optional
 
 PENALTY_FACTOR = 0.75
 MEM_THRESHOLD = 0.5
 
-# device_fit weights, by duty_cycle - only used when battery_powered=True.
-# When not battery-powered: fixed 0.5/0.5 mem/word (defined inline below).
 BATTERY_WEIGHTS = {
     "Sporadic":   {"mem": 0.45, "word": 0.45, "energy": 0.10},
     "Periodic":   {"mem": 0.40, "word": 0.40, "energy": 0.20},
@@ -22,18 +15,6 @@ BATTERY_WEIGHTS = {
 
 
 def memory_feasible(cipher_entry, device, packet_size_bytes: int) -> bool:
-    """Hard exclusion, not a score: if a cipher's peak memory genuinely
-    exceeds the device's RAM, it cannot run without fragmenting the buffer
-    into smaller chunks - an architectural change this model doesn't
-    support, so such a cipher is excluded from candidates entirely rather
-    than just scored very low.
-
-    Uses the linear-fit memory estimate (catalog.CipherEntry.estimate_memory_kb),
-    not the closest benchmarked row's raw value - a request between two
-    benchmarked sizes (e.g. 0.6MB) would otherwise round to whichever real
-    row is numerically closer (e.g. 1MB) and use THAT row's footprint,
-    wrongly excluding a cipher that would actually fit at the real
-    requested size."""
     device_ram_kb = device.ram_size_mb * 1024
     estimated_kb = cipher_entry.estimate_memory_kb(device).estimate(packet_size_bytes)
     return estimated_kb <= device_ram_kb
@@ -47,25 +28,10 @@ def memory_fit(cipher_memory_kb: float, device_ram_kb: float) -> float:
 
 
 def word_fit(cipher_name: str, device) -> float:
-    """Delegates to catalog.word_fit_for_cascade - handles per-component
-    behavior (SPECK's adaptive floor, RECTANGLE's full adaptability, fixed
-    ciphers, and AES's AES-NI-aware special case) uniformly, worst-component-wins for cascades."""
     return catalog.word_fit_for_cascade(cipher_name, device)
 
 
 def energy_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict) -> Optional[float]:
-    """
-    Normalized against the FULL catalog (not the candidate pool) at this
-    device's actual hardware state and this packet size - lower energy ->
-    higher fit. Returns None if energy data isn't available for this
-    cipher/device/size combination (caller falls back to non-battery weighting).
-
-    Uses the linear-fit energy estimate (catalog.CipherEntry.estimate_energy_mah),
-    not a closest-match row - fixes a real gap: this used to round an
-    in-between packet size (e.g. 25MB) to whichever real benchmarked size
-    was numerically closest, unlike memory and time/throughput/latency,
-    which already got the proper linear-fit treatment.
-    """
     catalog_values = {}
     for name, entry in full_catalog.items():
         model = entry.estimate_energy_mah(device)
@@ -83,13 +49,7 @@ def energy_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict)
 
 
 def device_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict = None) -> dict:
-    """
-    Returns {"score": float, "breakdown": {...}} - breakdown included for
-    auditability/debugging, same pattern as the rest of the model.
-    full_catalog is needed for energy_fit's catalog-wide normalization -
-    pass the same catalog dict decision_model.py already has loaded.
-    """
-    device_ram_kb = device.ram_size_mb * 1024  # ram_size stored in MB per the profile schema
+    device_ram_kb = device.ram_size_mb * 1024
 
     estimated_memory_kb = cipher_entry.estimate_memory_kb(device).estimate(packet_size_bytes)
     mem_fit = memory_fit(estimated_memory_kb, device_ram_kb)
@@ -105,9 +65,6 @@ def device_fit(cipher_entry, device, packet_size_bytes: int, full_catalog: dict 
     nrg_fit = energy_fit(cipher_entry, device, packet_size_bytes, full_catalog) if full_catalog else None
 
     if nrg_fit is None:
-        # No energy data available for this cipher/device/size - fall back to
-        # the non-battery weighting rather than guess. Flagged in the
-        # breakdown so callers can see this happened.
         score = 0.5 * mem_fit + 0.5 * wrd_fit
         breakdown = {"memory_fit": mem_fit, "word_fit": wrd_fit, "energy_fit": None,
                      "weights": {"mem": 0.5, "word": 0.5, "energy": 0.0},

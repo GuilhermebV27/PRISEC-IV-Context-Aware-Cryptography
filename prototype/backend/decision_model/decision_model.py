@@ -1,14 +1,8 @@
 """
-decision_model.py
-
 Single entry point: decide(profile, context, weights) -> ranked list of
 ciphers with full score breakdowns.
 
 final_score(cipher) = w_device*device_fit + w_security*security_fit + w_application*application_fit
-
-Weights are user-configurable (must sum to exactly 1); default is equal
-thirds. This module imports the three focused fit modules rather than
-containing their logic itself.
 """
 
 from dataclasses import dataclass
@@ -37,8 +31,8 @@ class Device:
     word_bits: int
     battery_powered: bool
     hw_accel_aes_ni: bool
-    hw_accel_simd_best_tier: Optional[str]  # None (no SIMD) / "ssse3"/"avx2"/"avx512"/"neon"/"sve"
-    duty_cycle: str  # needed here too, since device_fit's energy_fit weighting depends on it
+    hw_accel_simd_best_tier: Optional[str]
+    duty_cycle: str
 
 
 @dataclass
@@ -82,11 +76,6 @@ def decide(device: Device, context: Context, weights: Optional[dict] = None) -> 
     requirement = security_fit.compute_requirement(
         context.security_level, context.data_confidentiality, context.data_lifetime
     )
-
-    # Hard feasibility filter: exclude any cipher whose peak memory genuinely
-    # exceeds the device's RAM (would require buffer fragmentation, not
-    # modeled). Done BEFORE scoring, and the surviving set is what
-    # application_fit normalizes throughput/latency/setup against too.
     feasible = {
         name: entry for name, entry in catalog.items()
         if device_fit.memory_feasible(entry, device, context.packet_size_bytes)
@@ -121,12 +110,6 @@ def decide(device: Device, context: Context, weights: Optional[dict] = None) -> 
     tied_winners = [name for name, r in results.items() if abs(r["final_score"] - best_score) < 1e-9]
 
     if len(tied_winners) > 1:
-        # Exact ties are broken by security_strength (highest wins) rather
-        # than returning every tied cipher - a deliberate, deterministic
-        # tiebreaker, not an arbitrary pick. If security_strength ALSO ties
-        # (rare - would need two ciphers with identical final_score AND
-        # identical security_strength), the remaining tied set is returned
-        # as-is, since there's no further rule to break it by.
         best_strength = max(feasible[name].security_strength for name in tied_winners)
         tied_winners = [name for name in tied_winners
                         if abs(feasible[name].security_strength - best_strength) < 1e-9]

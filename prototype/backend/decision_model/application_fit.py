@@ -1,17 +1,13 @@
 """
-application_fit.py
-
 application_fit(cipher) = w_throughput_eff*throughput_fit + w_latency_eff*latency_fit
                          + w_setup_eff*setup_fit
-
-See application-needs-profile.md for the full design rationale.
 """
 
 import catalog
 
 PENALTY_FACTOR = 0.75
 
-REFERENCE_CLOCK_MHZ = 2500  # benchmark suite's reference machine (Xeon Platinum 8259CL)
+REFERENCE_CLOCK_MHZ = 2500
 
 LATENCY_TOLERANCE_SCORE = {"High": 0.4, "Medium": 0.7, "Low": 1.0}
 THROUGHPUT_REQUIRED_SCORE = {"Low": 0.25, "Medium": 0.5, "High": 0.75, "Very High": 1.0}
@@ -24,22 +20,19 @@ DUTY_CYCLE_WEIGHTS = {
 
 
 def word_penalty(cipher_name: str, device) -> float:
-    """Delegates to catalog.word_penalty_for_cascade - same per-component
-    handling as device_fit.word_fit, worst-component-wins for cascades."""
     return catalog.word_penalty_for_cascade(cipher_name, device)
 
 
 def scale_time(benchmark_value_ms_or_us: float, device_clock_mhz: float, cipher_name: str, device) -> float:
-    """Applies clock-speed + word-size scaling. Unit-agnostic (works for both
-    enc_ms and setup_us, caller keeps track of which unit is which)."""
+    """Scale a benchmark time (ms or us) from the reference clock to the
+    device's clock, and apply any word-size penalty for this cipher on this device."""
     clock_ratio = REFERENCE_CLOCK_MHZ / device_clock_mhz
     return benchmark_value_ms_or_us * clock_ratio * word_penalty(cipher_name, device)
 
 
 def scale_throughput(benchmark_throughput_mbps: float, device_clock_mhz: float, cipher_name: str, device) -> float:
     """Throughput is inversely related to time, so it scales by the INVERSE
-    of scale_time()'s multiplier - a slower/narrower device gets LOWER
-    throughput, not higher."""
+    of scale_time()'s multiplier"""
     clock_ratio = REFERENCE_CLOCK_MHZ / device_clock_mhz
     multiplier = clock_ratio * word_penalty(cipher_name, device)
     return benchmark_throughput_mbps / multiplier
@@ -55,9 +48,7 @@ def throughput_fit(cipher_entry, device, packet_size_bytes: int, throughput_requ
                     candidate_scaled_throughputs: dict) -> float:
     """
     candidate_scaled_throughputs: {cipher_name: scaled_throughput_mbps} for
-    every candidate in THIS decision - used to normalize offer to 0-1 before
-    the capped comparison (higher raw Mbps = better, so no inversion needed).
-    """
+    every candidate in THIS decision"""
     requirement = THROUGHPUT_REQUIRED_SCORE[throughput_required]
     values = list(candidate_scaled_throughputs.values())
     lo, hi = min(values), max(values)
@@ -79,19 +70,7 @@ def latency_fit(cipher_entry, device, packet_size_bytes: int, latency_tolerance:
 
 
 def setup_fit(amort: float) -> float:
-    """Self-referential, NOT peer-relative (fixed from an earlier bug):
-    setup_fit = 1 - amortization_factor, matching how w_setup_effective is
-    already computed (also self-referential, via amortization_factor). The
-    original peer-relative version (normalized against other candidates in
-    the pool) let an expensive ECC cipher's setup_fit look decent just
-    because OTHER slow-setup candidates were also in the pool, even while
-    its own amortization_factor (and therefore its weight) correctly
-    marked it as setup-dominated - producing a large weight on a
-    not-actually-bad score, the opposite of what should happen. Using the
-    same self-referential basis for both the weight and the score fixes
-    this: a cipher whose setup genuinely dominates its own workload now
-    gets penalized on setup_fit itself, not just weighted more without
-    being scored worse."""
+    """amortization_factor = setup_time / (setup_time + encryption_time)"""
     return 1 - amort
 
 
@@ -112,18 +91,9 @@ def amortization_factor(cipher_entry, device, packet_size_bytes: int) -> float:
 
 def application_fit(cipher_entry, device, packet_size_bytes: int, context,
                      candidate_entries: dict) -> dict:
-    """
-    context needs: .duty_cycle, .latency_tolerance, .throughput_required
-    candidate_entries: {cipher_name: CipherEntry} - every candidate in this
-    decision, needed to normalize throughput/latency/setup against each
-    other before the capped comparison.
-    """
+
     base_weights = DUTY_CYCLE_WEIGHTS[context.duty_cycle]
 
-    # Build normalization pools across all candidates, scaled for this device
-    # (throughput/latency stay peer-relative - only setup_fit changed to
-    # self-referential, see setup_fit's docstring). Both now come from each
-    # candidate's fitted TimeModel, not a closest-match benchmark row.
     scaled_throughputs, scaled_latencies = {}, {}
     for name, entry in candidate_entries.items():
         estimate = entry.estimate_time_ms(device).estimate(packet_size_bytes)
@@ -152,9 +122,7 @@ def application_fit(cipher_entry, device, packet_size_bytes: int, context,
             "throughput_fit": t_fit, "latency_fit": l_fit, "setup_fit": s_fit,
             "amortization_factor": amort,
             "weights_effective": {"throughput": w_throughput_eff, "latency": w_latency_eff, "setup": w_setup_eff},
-            "below_min_sample": below_min_sample,  # True = packet size is below the smallest real
-                                                     # benchmark (1KB) - lower confidence, extrapolated
-            "interpolated": interpolated,  # True = packet size sits between two real benchmarked
-                                             # sizes - bracket-averaged, not extrapolated
+            "below_min_sample": below_min_sample,
+            "interpolated": interpolated,
         },
     }

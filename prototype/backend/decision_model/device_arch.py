@@ -1,9 +1,6 @@
 """
-device_arch.py
-
 Maps the CPU_OPTIONS architecture string (stored on the Profile) to its
-word size in bits - same mapping as ARCH_WIDTH_SCORE in deviceTier.js /
-device-classification-model.md, ported to Python for backend use.
+word size in bits.
 """
 
 ARCH_WORD_BITS = {

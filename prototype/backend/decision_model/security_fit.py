@@ -1,10 +1,6 @@
 """
-security_fit.py
-
 requirement = weighted sum of security_level/confidentiality/data_lifetime
 security_fit(cipher) = capped offer-vs-requirement rule
-
-See security-needs-profile.md for the full design rationale.
 """
 
 PENALTY_FACTOR = 0.75
