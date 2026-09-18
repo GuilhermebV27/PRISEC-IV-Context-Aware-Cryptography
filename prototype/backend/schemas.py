@@ -13,7 +13,7 @@ class ProfileCreate(BaseModel):
     ram_size: float | None = None
     battery_powered: bool | None = None
     hw_accel_aes_ni: bool | None = None
-    hw_accel_simd_presence: bool | None = None         # NEW
+    hw_accel_simd_presence: bool | None = None
     hw_accel_simd_best_tier: str | None = None
     device_tier: int | None = None
 
@@ -31,7 +31,7 @@ class ProfileUpdate(ProfileCreate):
 
 class DecisionCreate(BaseModel):
     profile_id: int
-    context_json: str          # or a nested model, see note below
+    context_json: str
     recommended_cipher: str
     decision_metadata: Optional[str] = None
 
