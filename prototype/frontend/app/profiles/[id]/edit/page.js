@@ -69,6 +69,7 @@ export default function EditProfilePage() {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [simdTierMissing, setSimdTierMissing] = useState(false);
 
   // Was this profile originally created via auto-detect? If so, the three
   // boolean fields stay locked unless the user re-runs Auto-Detect now.
@@ -178,7 +179,7 @@ export default function EditProfilePage() {
       if (!ramDetected) missing.push("RAM capacity");
       if (missing.length) {
         setError(
-          `Couldn't auto-detect: ${missing.join(", ")}. Please fill those in manually — everything else was applied.`,
+          `Couldn't auto-detect: ${missing.join(", ")}. Please fill those in manually - everything else was applied.`,
         );
       }
     } catch (err) {
@@ -196,6 +197,10 @@ export default function EditProfilePage() {
       form.battery_powered === null
     ) {
       setError("Please fill in all required fields.");
+      return;
+    }
+    if (form.hw_accel_simd_presence === true && !form.hw_accel_simd_best_tier) {
+      setSimdTierMissing(true);
       return;
     }
 
@@ -323,7 +328,7 @@ export default function EditProfilePage() {
 
           {isAutoLocked && (
             <p className="text-xs font-mono text-[#8a8a8a] mb-6 -mt-4">
-              This profile was auto-detected — Battery-powered, AES-NI, and SIMD Presence are locked.
+              This profile was auto-detected - Battery-powered, AES-NI, and SIMD Presence are locked.
               Re-run Auto-Detect above to override them, or edit the remaining fields freely.
             </p>
           )}
@@ -350,7 +355,7 @@ export default function EditProfilePage() {
                 ))}
               </select>
               {detectionIssues.cpu_architecture && (
-                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please select manually.</p>
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect - please select manually.</p>
               )}
             </div>
 
@@ -381,7 +386,7 @@ export default function EditProfilePage() {
                 </select>
               </div>
               {detectionIssues.clock_speed && (
-                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please enter manually.</p>
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect - please enter manually.</p>
               )}
             </div>
 
@@ -402,7 +407,7 @@ export default function EditProfilePage() {
                 }`}
               />
               {detectionIssues.core_count && (
-                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please enter manually.</p>
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect - please enter manually.</p>
               )}
             </div>
 
@@ -431,7 +436,7 @@ export default function EditProfilePage() {
                 ))}
               </select>
               {detectionIssues.ram_size && (
-                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect — please enter manually.</p>
+                <p className="text-[11px] text-red-400 mt-1.5">Couldn't detect - please enter manually.</p>
               )}
             </div>
 
@@ -492,7 +497,10 @@ export default function EditProfilePage() {
                 </ToggleButton>
                 <ToggleButton
                   active={form.hw_accel_simd_presence === false}
-                  onClick={() => update("hw_accel_simd_presence", false)}
+                  onClick={() => {
+                    update("hw_accel_simd_presence", false);
+                    setSimdTierMissing(false);
+                  }}
                   disabled={isAutoLocked}
                 >
                   No
@@ -505,15 +513,25 @@ export default function EditProfilePage() {
               <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">HIGHEST SIMD TIER</label>
               <select
                 value={form.hw_accel_simd_best_tier}
-                onChange={(e) => update("hw_accel_simd_best_tier", e.target.value)}
+                onChange={(e) => {
+                  update("hw_accel_simd_best_tier", e.target.value);
+                  setSimdTierMissing(false);
+                }}
                 disabled={form.hw_accel_simd_presence !== true}
-                className="w-full bg-[#0a0a0a] border border-white/15 rounded-md px-4 py-3 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#5b8cff] disabled:opacity-40"
+                className={`w-full bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#5b8cff] disabled:opacity-40 ${
+                  simdTierMissing ? "border-red-500" : "border-white/15"
+                }`}
               >
                 <option value="" disabled>Select highest SIMD tier</option>
                 {SIMD_TIER_OPTIONS.map((opt) => (
                   <option key={opt} value={opt}>{opt.toUpperCase()}</option>
                 ))}
               </select>
+              {simdTierMissing && (
+                <p className="text-[11px] text-red-400 mt-1.5">
+                  SIMD support is set to Yes - please select a tier before saving.
+                </p>
+              )}
             </div>
           </div>
 

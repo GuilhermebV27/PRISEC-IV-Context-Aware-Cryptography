@@ -81,6 +81,9 @@ export default function ContextPage() {
   const [profile, setProfile] = useState(null);
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [result, setResult] = useState(null);
+  const [lastPacketSizeBytes, setLastPacketSizeBytes] = useState(null);
+  const [realTestResult, setRealTestResult] = useState(null);
+  const [realTestError, setRealTestError] = useState(null);
   const [matchesDevice, setMatchesDevice] = useState(null);
   const [runningTest, setRunningTest] = useState(false);
 
@@ -96,6 +99,7 @@ export default function ContextPage() {
   });
 
   const [weights, setWeights] = useState(DEFAULT_WEIGHTS);
+  const [saveDecision, setSaveDecision] = useState(true); // saved to history by default - toggle to opt out
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -110,7 +114,7 @@ export default function ContextPage() {
     }
   }, [id]);
 
-  // Persist on every change so switching out of Debug Mode and back doesn't lose anything.
+  // Persist on every change so switching out of Deeper Analysis and back doesn't lose anything.
   // Skips its own FIRST run - see the matching comment in context/[id]/page.js for why:
   // without this, the save effect would clobber the just-restored state with stale
   // pre-restore defaults on every single mount.
@@ -250,7 +254,7 @@ export default function ContextPage() {
           packet_size_bytes: packetSizeBytes,
         },
         weights,
-        persist: false, // debug page - exploratory runs shouldn't clutter the decisions table
+        persist: saveDecision,
       };
       const res = await fetch("http://127.0.0.1:8000/decision", {
         method: "POST",
@@ -263,6 +267,9 @@ export default function ContextPage() {
       }
       const data = await res.json();
       setResult(data);
+      setLastPacketSizeBytes(packetSizeBytes);
+      setRealTestResult(null);
+      setRealTestError(null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -271,9 +278,30 @@ export default function ContextPage() {
   };
 
   const handleRunRealTest = async () => {
+    if (!result || result.infeasible || !result.recommended_ciphers?.length || lastPacketSizeBytes == null) return;
+
     setRunningTest(true);
+    setRealTestError(null);
+    setRealTestResult(null);
     try {
-      // Call your /execute endpoint here once built
+      const res = await fetch("http://127.0.0.1:8000/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile_id: parseInt(id),
+          cipher: result.recommended_ciphers[0],
+          packet_size_bytes: lastPacketSizeBytes,
+          warmup_runs: 5,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || "Failed to run the real encryption test");
+      }
+      const data = await res.json();
+      setRealTestResult(data);
+    } catch (err) {
+      setRealTestError(err.message);
     } finally {
       setRunningTest(false);
     }
@@ -304,13 +332,13 @@ export default function ContextPage() {
         <div className="flex items-center gap-2">
           <div className="font-mono text-sm tracking-widest text-[#e6e6e6] font-semibold">PRISEC-IV</div>
           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-[#5b8cff]/40 text-[#5b8cff]">
-            DEBUG MODE
+            DEEPER ANALYSIS
           </span>
         </div>
         <Link href={`/context/${id}`}>
           <button className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border border-white/15 text-[#8a8a8a] hover:bg-white/5 hover:text-[#5b8cff] transition">
             <ArrowLeftRight size={14} />
-            Exit Debug Mode
+            Exit Deeper Analysis
           </button>
         </Link>
       </div>
@@ -331,15 +359,47 @@ export default function ContextPage() {
               Describe the deployment so the model can weigh it against the device profile.
             </p>
 
-            <div className="flex items-center justify-between bg-[#121212] border border-white/10 rounded-xl px-5 py-4 mb-8">
-              <div className="flex items-center gap-2">
-                <Shield size={16} className="text-[#5b8cff]" />
-                <span className="text-sm text-[#8a8a8a]">For profile</span>
-                <span className="text-sm font-semibold">{profile.name}</span>
+            <div className="flex items-stretch gap-3 mb-8">
+              <div className="flex-1 flex items-center justify-between bg-[#121212] border border-white/10 rounded-xl px-5 py-4">
+                <div className="flex items-center gap-2">
+                  <Shield size={16} className="text-[#5b8cff]" />
+                  <span className="text-sm text-[#8a8a8a]">For profile</span>
+                  <span className="text-sm font-semibold">{profile.name}</span>
+                </div>
+                <span className="font-mono text-xs text-[#8a8a8a]">
+                  {profile.cpu_architecture} · {formatClockSpeed(profile.clock_speed)} · {profile.core_count} · {formatRam(profile.ram_size)} · {profile.battery_powered ? "Yes" : "No"} · AES-NI: {profile.hw_accel_aes_ni ? "Yes" : "No"} · SIMD: {profile.hw_accel_simd_presence ? (profile.hw_accel_simd_best_tier || "—").toUpperCase() : "No"}
+                </span>
               </div>
-              <span className="font-mono text-xs text-[#8a8a8a]">
-                {profile.cpu_architecture} · {formatClockSpeed(profile.clock_speed)} · {profile.core_count} · {formatRam(profile.ram_size)} · {profile.battery_powered ? "Yes" : "No"} · AES-NI: {profile.hw_accel_aes_ni ? "Yes" : "No"} · SIMD: {profile.hw_accel_simd_presence ? (profile.hw_accel_simd_best_tier || "—").toUpperCase() : "No"}
-              </span>
+
+              <div className="flex-none flex flex-col justify-center bg-[#121212] border border-white/10 rounded-xl px-4 py-2">
+                <label className="block font-mono text-[10px] text-[#5b8cff] tracking-wide mb-1.5 whitespace-nowrap">
+                  SAVE TO HISTORY
+                </label>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setSaveDecision(true)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-semibold transition ${
+                      saveDecision
+                        ? "bg-gradient-to-b from-[#7aa3ff] to-[#4a7bef] text-[#0a0a0a]"
+                        : "border border-white/15 text-[#c7c7c7] hover:bg-white/5"
+                    }`}
+                  >
+                    Yes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSaveDecision(false)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-semibold transition ${
+                      !saveDecision
+                        ? "bg-gradient-to-b from-[#7aa3ff] to-[#4a7bef] text-[#0a0a0a]"
+                        : "border border-white/15 text-[#c7c7c7] hover:bg-white/5"
+                    }`}
+                  >
+                    No
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Context form card */}
@@ -530,6 +590,24 @@ export default function ContextPage() {
                       Cipher Fit: {result.scores[result.recommended_ciphers[0]].final_score.toFixed(4)}
                     </div>
                   )}
+                  {result.scores && result.recommended_ciphers.length > 0 && (() => {
+                    const b = result.scores[result.recommended_ciphers[0]].application_fit?.breakdown;
+                    if (!b) return null;
+                    return (
+                      <div className="flex gap-1.5 mt-2">
+                        {(b.interpolated || b.below_min_sample) && (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-yellow-500/40 text-yellow-400">
+                            Interpolated
+                          </span>
+                        )}
+                        {b.below_min_sample && (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-orange-500/40 text-orange-400">
+                            Below Min Sample
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -674,7 +752,7 @@ export default function ContextPage() {
                 <button
                   type="button"
                   onClick={handleRunRealTest}
-                  disabled={matchesDevice !== true || runningTest}
+                  disabled={matchesDevice !== true || runningTest || !result || result.infeasible}
                   className="w-full py-2.5 rounded-md text-sm font-semibold border border-white/15 text-[#c7c7c7] hover:bg-white/5 transition disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                 >
                   {runningTest ? "Running..." : "Run Real Encryption Test"}
@@ -687,6 +765,56 @@ export default function ContextPage() {
                 )}
               </div>
             </div>
+
+            {(runningTest || realTestError || realTestResult) && (
+              <div className="mt-4 bg-[#121212] border border-[#5b8cff]/40 rounded-xl p-5">
+                {runningTest && (
+                  <p className="text-sm text-[#8a8a8a] font-mono">
+                    Running real encryption on this device...
+                  </p>
+                )}
+
+                {!runningTest && realTestError && (
+                  <div>
+                    <p className="text-[11px] text-red-400 mb-1">Real encryption test failed</p>
+                    <p className="text-[12px] text-[#c7c7c7] leading-relaxed">{realTestError}</p>
+                  </div>
+                )}
+
+                {!runningTest && realTestResult && (
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-sm font-semibold">
+                        Real encryption result — {realTestResult.cipher}
+                      </p>
+                      {!realTestResult.roundtrip_ok && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-red-500/40 text-red-400">
+                          Roundtrip mismatch
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-[#0a0a0a] border border-white/10 rounded-lg px-3 py-2.5">
+                        <div className="text-[10px] font-mono text-[#5b8cff] mb-1">TIME</div>
+                        <div className="text-sm font-semibold">{realTestResult.time_ms.toFixed(4)} ms</div>
+                      </div>
+                      <div className="bg-[#0a0a0a] border border-white/10 rounded-lg px-3 py-2.5">
+                        <div className="text-[10px] font-mono text-[#5b8cff] mb-1">THROUGHPUT</div>
+                        <div className="text-sm font-semibold">{realTestResult.throughput_mbps.toFixed(2)} Mbps</div>
+                      </div>
+                      <div className="bg-[#0a0a0a] border border-white/10 rounded-lg px-3 py-2.5">
+                        <div className="text-[10px] font-mono text-[#5b8cff] mb-1">LATENCY</div>
+                        <div className="text-sm font-semibold">{realTestResult.latency_us.toFixed(6)} µs/block</div>
+                      </div>
+                      <div className="bg-[#0a0a0a] border border-white/10 rounded-lg px-3 py-2.5">
+                        <div className="text-[10px] font-mono text-[#5b8cff] mb-1">MEMORY OVERHEAD</div>
+                        <div className="text-sm font-semibold">{realTestResult.memory_overhead_kb.toFixed(2)} KB</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

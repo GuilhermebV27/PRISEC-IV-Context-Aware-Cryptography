@@ -36,3 +36,10 @@ export async function updateProfile(id, profile) {
   if (!res.ok) throw new Error("Failed to update profile");
   return res.json();
 }
+
+export async function getLatestDecision() {
+  const res = await fetch(`${API_BASE}/decisions/latest`);
+  if (res.status === 404) return null; // no decisions yet, or the profile was deleted since - both are the "no valid last decision" case
+  if (!res.ok) throw new Error("Failed to fetch latest decision");
+  return res.json();
+}

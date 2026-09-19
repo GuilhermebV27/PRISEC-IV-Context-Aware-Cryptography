@@ -4,14 +4,16 @@ import models
 import psutil
 import schemas
 from database import Base, engine, get_db
-from decision_adapter import build_context, build_device
-from decision_model.decision_model import decide as run_decision
-from decision_model.decision_model import validate_weights
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from hw_detect import best_simd_tier, detect_hw_aes, detect_simd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from decision_adapter import build_context, build_device
+from decision_model.decision_model import decide as run_decision
+from decision_model.decision_model import validate_weights
+import live_execute
 
 Base.metadata.create_all(bind=engine)
 
@@ -78,7 +80,7 @@ def detect_specs():
         "cpu_architecture": platform.machine(),
         "clock_speed_mhz": clock_speed_mhz,
         "core_count": psutil.cpu_count(logical=True),
-        "ram_size_mb": round(psutil.virtual_memory().total / (1024 * 1024)),
+        "ram_size_mb": psutil.virtual_memory().total / (1024 * 1024),
         "battery_powered": psutil.sensors_battery() is not None,
         "hw_accel_aes_ni": detect_hw_aes(),
         "hw_accel_simd_presence": any(simd.values()),
@@ -104,6 +106,10 @@ def create_decision(request: schemas.DecisionRequest, db: Session = Depends(get_
     result = run_decision(device, context, weights)
 
     if request.persist:
+        winning_final_score = None
+        if not result["infeasible"] and result["recommended_ciphers"]:
+            winning_final_score = result["all_scores"][result["recommended_ciphers"][0]]["final_score"]
+
         import json
         db_decision = models.Decision(
             profile_id=request.profile_id,
@@ -113,6 +119,7 @@ def create_decision(request: schemas.DecisionRequest, db: Session = Depends(get_
                 "infeasible": result["infeasible"],
                 "reason": result.get("reason"),
                 "weights_used": result["weights_used"],
+                "final_score": winning_final_score,
             }),
         )
         db.add(db_decision)
@@ -126,4 +133,69 @@ def create_decision(request: schemas.DecisionRequest, db: Session = Depends(get_
         requirement=result.get("requirement"),
         weights_used=result["weights_used"],
         scores=result.get("all_scores"),
+    )
+
+
+@app.get("/decisions/latest", response_model=schemas.LatestDecisionResponse)
+def get_latest_decision(db: Session = Depends(get_db)):
+    latest = db.scalars(
+        select(models.Decision).order_by(models.Decision.created_at.desc())
+    ).first()
+    if not latest:
+        raise HTTPException(status_code=404, detail="No decisions have been made yet")
+
+    profile = db.get(models.Profile, latest.profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="The profile for this decision no longer exists")
+
+    import json
+    context = json.loads(latest.context_json)
+    ciphers = json.loads(latest.recommended_cipher) if latest.recommended_cipher else []
+    metadata = json.loads(latest.decision_metadata) if latest.decision_metadata else {}
+
+    return schemas.LatestDecisionResponse(
+        profile=profile,
+        context=schemas.DecisionContext(**context),
+        recommended_ciphers=ciphers,
+        infeasible=metadata.get("infeasible", False),
+        reason=metadata.get("reason"),
+        final_score=metadata.get("final_score"),
+        created_at=latest.created_at,
+    )
+
+
+@app.post("/execute", response_model=schemas.ExecuteResponse)
+def execute_live_encryption(request: schemas.ExecuteRequest, db: Session = Depends(get_db)):
+    """
+    Runs ONE real encryption of `request.cipher` at `request.packet_size_bytes`,
+    on THIS actual machine (wherever this backend process happens to be
+    running). Deliberately NOT compared against the model's own prediction -
+    a single live run, under whatever load happens to be on the machine at
+    that moment, is its own isolated measurement, not a fair like-for-like
+    test of the model's benchmark-trained estimates.
+
+    Only meaningful when the profile's specs genuinely describe the machine
+    this backend is running on - the frontend gates the button on this
+    (the "Does this profile match this device?" check) before ever calling
+    this endpoint, since the backend itself has no way to verify that.
+    """
+    profile = db.get(models.Profile, request.profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    try:
+        live_result = live_execute.run_live_encryption(
+            request.cipher, request.packet_size_bytes, request.warmup_runs
+        )
+    except live_execute.LiveExecutionError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return schemas.ExecuteResponse(
+        cipher=request.cipher,
+        packet_size_bytes=live_result["packet_size_bytes"],
+        roundtrip_ok=live_result["roundtrip_ok"],
+        time_ms=live_result["enc_ms"],
+        throughput_mbps=live_result["throughput_enc_mbps"],
+        latency_us=live_result["latency_us"],
+        memory_overhead_kb=live_result["memory_enc_overhead_kb"],
     )

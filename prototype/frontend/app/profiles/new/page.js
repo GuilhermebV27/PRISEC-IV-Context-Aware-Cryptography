@@ -117,6 +117,10 @@ export default function NewProfilePage() {
       core_count: !form.core_count,
       ram_size: !form.ram_size_kb,
       battery_powered: form.battery_powered === null,
+      // Only required when the user EXPLICITLY picked Yes - the tier field
+      // stays disabled otherwise, so requiring it in the untouched/No cases
+      // would create a field the user has no way to fill in.
+      hw_accel_simd_best_tier: form.hw_accel_simd_presence === true && !form.hw_accel_simd_best_tier,
     };
     const hasMissing = Object.values(missing).some(Boolean);
     if (hasMissing) {
@@ -209,7 +213,7 @@ export default function NewProfilePage() {
       if (!ramDetected) missing.push("RAM capacity");
       if (missing.length) {
         setError(
-          `Couldn't auto-detect: ${missing.join(", ")}. Please fill those in manually — everything else was applied.`,
+          `Couldn't auto-detect: ${missing.join(", ")}. Please fill those in manually - everything else was applied.`,
         );
       }
     } catch (err) {
@@ -476,7 +480,10 @@ export default function NewProfilePage() {
                 </ToggleButton>
                 <ToggleButton
                   active={form.hw_accel_simd_presence === false}
-                  onClick={() => update("hw_accel_simd_presence", false)}
+                  onClick={() => {
+                    update("hw_accel_simd_presence", false);
+                    clearIssue("hw_accel_simd_best_tier");
+                  }}
                   disabled={detected}
                 >
                   No
@@ -491,9 +498,14 @@ export default function NewProfilePage() {
               </label>
               <select
                 value={form.hw_accel_simd_best_tier}
-                onChange={(e) => update("hw_accel_simd_best_tier", e.target.value)}
+                onChange={(e) => {
+                  update("hw_accel_simd_best_tier", e.target.value);
+                  clearIssue("hw_accel_simd_best_tier");
+                }}
                 disabled={detected || form.hw_accel_simd_presence !== true}
-                className="w-full bg-[#0a0a0a] border border-white/15 rounded-md px-4 py-3 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#5b8cff] disabled:opacity-40"
+                className={`w-full bg-[#0a0a0a] border rounded-md px-4 py-3 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#5b8cff] disabled:opacity-40 ${
+                  fieldIssues.hw_accel_simd_best_tier ? "border-red-500" : "border-white/15"
+                }`}
               >
                 <option value="" disabled>
                   Select highest SIMD tier
@@ -504,6 +516,11 @@ export default function NewProfilePage() {
                   </option>
                 ))}
               </select>
+              {fieldIssues.hw_accel_simd_best_tier && (
+                <p className="text-[11px] text-red-400 mt-1.5">
+                  SIMD support is set to Yes - please select a tier before saving.
+                </p>
+              )}
             </div>
           </div>
 

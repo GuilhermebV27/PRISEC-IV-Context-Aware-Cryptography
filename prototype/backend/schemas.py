@@ -13,7 +13,7 @@ class ProfileCreate(BaseModel):
     ram_size: float | None = None
     battery_powered: bool | None = None
     hw_accel_aes_ni: bool | None = None
-    hw_accel_simd_presence: bool | None = None
+    hw_accel_simd_presence: bool | None = None         # NEW
     hw_accel_simd_best_tier: str | None = None
     device_tier: int | None = None
 
@@ -31,7 +31,7 @@ class ProfileUpdate(ProfileCreate):
 
 class DecisionCreate(BaseModel):
     profile_id: int
-    context_json: str
+    context_json: str          # or a nested model, see note below
     recommended_cipher: str
     decision_metadata: Optional[str] = None
 
@@ -66,6 +66,33 @@ class DecisionRequest(BaseModel):
     context: DecisionContext
     weights: DecisionWeights | None = None
     persist: bool = True  # set False for debug/exploratory runs that shouldn't be saved to the decisions table
+
+
+class LatestDecisionResponse(BaseModel):
+    profile: ProfileOut
+    context: DecisionContext
+    recommended_ciphers: list[str]
+    infeasible: bool
+    reason: str | None = None
+    final_score: float | None = None
+    created_at: datetime
+
+
+class ExecuteRequest(BaseModel):
+    profile_id: int
+    cipher: str            # e.g. "AES-128", "ECC+AES-256+ChaCha20+AES-128" - matches catalog naming
+    packet_size_bytes: int
+    warmup_runs: int = 5   # discarded cycles before the measured run, to avoid cold-start skew
+
+
+class ExecuteResponse(BaseModel):
+    cipher: str
+    packet_size_bytes: int
+    roundtrip_ok: bool         # sanity check - decrypted output actually matched the original
+    time_ms: float             # full encrypt call, matching enc_ms
+    throughput_mbps: float
+    latency_us: float          # per-byte
+    memory_overhead_kb: float  # encryption-side working memory beyond the output buffer itself
 
 
 class DecisionResponse(BaseModel):

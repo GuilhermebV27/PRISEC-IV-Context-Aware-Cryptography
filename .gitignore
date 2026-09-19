@@ -3,3 +3,4 @@ venv/
 __pycache__/
 .vscode/
 .env
+prototype/backend/live_encrypt/run_once
