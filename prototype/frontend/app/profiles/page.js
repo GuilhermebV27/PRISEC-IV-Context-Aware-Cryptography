@@ -188,7 +188,7 @@ export default function ProfilesPage() {
                     <span>{p.battery_powered ? "Yes" : "No"}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[#8a8a8a]">AES-NI Support</span>
+                    <span className="text-[#8a8a8a]">AES Hardware Acceleration Support</span>
                     <span>{p.hw_accel_aes_ni ? "Yes" : "No"}</span>
                   </div>
                   <div className="flex justify-between">

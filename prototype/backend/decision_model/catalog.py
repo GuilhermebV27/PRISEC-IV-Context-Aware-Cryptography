@@ -27,45 +27,17 @@ def parse_data_size(raw: str) -> int:
     number = float(raw[:-2])
     return int(number * _SIZE_MULTIPLIERS[unit])
 
-
-# ---------------------------------------------------------------------------
-# Per-cipher static metadata (word size, acceleration requirements)
-# ---------------------------------------------------------------------------
-#
-# cipher_operand_bits: the word size word_fit compares against the device's
-# own word size. AES/ChaCha20 = 32-bit per their specs. HIGHT = 8-bit
-# (byte-oriented by design). RECTANGLE adapts to whatever width is
-# available (bit-sliced) and is handled as a special case (always 1.0,
-# never computed via the ratio) rather than a fixed operand size.
 CIPHER_OPERAND_BITS = {
     "AES-128": 32, "AES-192": 32, "AES-256": 32,
     "ChaCha20": 32,
     "HIGHT": 8,
-    "SPECK": 64,   # 16-byte (128-bit) block -> word = block/2 = 64-bit (Speck128/* family)
+    "SPECK": 64,
 }
 
-# SPECK can shrink its effective word size to match a narrower device (same
-# spirit as RECTANGLE's adaptability), stepping through REAL, actually-
-# published Speck2n/mn variants: Speck128/* (word=64), Speck64/* (word=32),
-# Speck32/64 (word=16, the smallest published variant - no smaller one
-# exists). Floor is therefore 16-bit, not arbitrary. RECTANGLE has NO floor
-# (fully adaptive); ciphers not listed here are fixed-width (no adaptation).
-#
-# KNOWN OPEN ITEM: the smallest variant (Speck32/64) has only a 32-bit
-# block size, which carries a real birthday-bound collision risk around
-# ~2^16 blocks (~256KB of data) - a genuine security weakness, not just a
-# performance tradeoff. security_strength is currently a single fixed
-# value per cipher regardless of which variant a given device ends up
-# using; whether SPECK's security_strength should be reduced when a narrow
-# device forces the smallest variant is an open design question, not yet
-# decided.
 CIPHER_WORD_ADAPT_FLOOR_BITS = {
     "SPECK": 16,
 }
 
-# Which acceleration family each base cipher can use. RECTANGLE needs AVX2
-# specifically (hard requirement in the reference implementation - falls
-# back to software, not a mismatch penalty, when AVX2 is absent).
 CIPHER_ACCEL_FAMILY = {
     "AES-128": "aes_ni", "AES-192": "aes_ni", "AES-256": "aes_ni",
     "ChaCha20": "chacha_simd",
@@ -73,8 +45,6 @@ CIPHER_ACCEL_FAMILY = {
     "SPECK": None, "HIGHT": None,
 }
 
-# SIMD tiers (from hw_detect.py's best_simd_tier) that count as "has ChaCha
-# SIMD acceleration" vs "has AVX2 specifically" (for RECTANGLE).
 _CHACHA_SIMD_TIERS = {"ssse3", "avx2", "avx512", "neon", "sve"}
 _AVX2_TIERS = {"avx2", "avx512"}
 
@@ -87,8 +57,8 @@ def cipher_components(name: str) -> list:
     return n.split("+")
 
 
-AES_NI_NARROW_DEVICE_WORD_FIT = 0.9  # flat fit for AES on <32-bit devices WITH AES-NI present
-AES_NI_NARROW_DEVICE_WORD_PENALTY = 1 / AES_NI_NARROW_DEVICE_WORD_FIT  # ~1.111, reciprocal for time-scaling consistency
+AES_NI_NARROW_DEVICE_WORD_FIT = 0.9
+AES_NI_NARROW_DEVICE_WORD_PENALTY = 1 / AES_NI_NARROW_DEVICE_WORD_FIT
 
 
 def component_word_fit(component: str, device) -> float:
@@ -168,11 +138,6 @@ def is_ecc(name: str) -> bool:
 def uses_component(name: str, component: str) -> bool:
     return component in cipher_components(name)
 
-
-# ---------------------------------------------------------------------------
-# security_strength ranking (from security-needs-profile.md #7)
-# ---------------------------------------------------------------------------
-
 SECURITY_STRENGTH = {
     "ECC+AES-256+ChaCha20+AES-128": 1.00,
     "ECC+AES-256+ChaCha20": 0.97,
@@ -202,11 +167,6 @@ SECURITY_STRENGTH = {
     "ECC+HIGHT": 0.31,
     "HIGHT": 0.26,
 }
-# All 27 rows now map cleanly to catalog entries - the earlier ambiguous
-# "ECC + RECTANGLE -> HIGHT" row is gone, replaced by "ECC + SPECK -> HIGHT"
-# (= ECC+SPECK+HIGHT), which matches the actual catalog. No open mapping
-# issue remains.
-
 
 @dataclass
 class BenchmarkRow:
@@ -227,15 +187,8 @@ class CipherEntry:
     security_strength: float
     is_ecc: bool
     setup_us: float
-    # ALL measured acceleration variants: {(aes_flag, simd_flag): {size_bytes: BenchmarkRow}}
     # flags are strings matching the CSV exactly: "1"/"0"/"NA"
     variants: dict = field(default_factory=dict)
-    # Caches for the fitted models below, keyed by (hw_accel_aes_ni,
-    # hw_accel_simd_best_tier) - the ONLY device fields that affect which
-    # variant's data gets used (word_bits/clock/ram don't). Since CipherEntry
-    # instances live inside the globally-cached catalog (decision_model.py's
-    # _CATALOG), these caches persist across requests too, not just within
-    # one decide() call - a real fix for repeated re-fitting on every access.
     _time_model_cache: dict = field(default_factory=dict, repr=False, compare=False)
     _memory_model_cache: dict = field(default_factory=dict, repr=False, compare=False)
     _energy_model_cache: dict = field(default_factory=dict, repr=False, compare=False)
@@ -256,12 +209,6 @@ class CipherEntry:
             row = self.closest_size(by_size, target_bytes)
             if row is not None:
                 return row
-        # Fallback: desired combo not measured (shouldn't happen for the 27
-        # catalog entries, verified against the full checklist) - use
-        # whatever variant IS available, preferring the most-accelerated one.
-        # Logged loudly rather than failing silently, since this means a
-        # device's exact hardware state has no matching benchmark data -
-        # worth knowing if it ever actually triggers.
         import sys
         print(f"[catalog] WARNING: '{self.name}' has no benchmark data for accel state {desired} - "
               f"falling back to a different measured variant. This should not happen for the current "

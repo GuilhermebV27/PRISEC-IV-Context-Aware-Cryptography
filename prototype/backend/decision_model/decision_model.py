@@ -52,9 +52,7 @@ def validate_weights(weights: dict):
         raise ValueError(f"Top-level weights must sum to exactly 1.0, got {total}")
 
 
-MAX_SUPPORTED_PACKET_SIZE_BYTES = 100 * 1024 * 1024  # 100MB - largest benchmarked size is 50MB;
-                                                        # beyond 100MB the closest-match approximation
-                                                        # is too far from any real measurement to trust
+MAX_SUPPORTED_PACKET_SIZE_BYTES = 100 * 1024 * 1024
 
 
 def decide(device: Device, context: Context, weights: Optional[dict] = None) -> dict:

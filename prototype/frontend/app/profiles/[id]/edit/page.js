@@ -465,7 +465,7 @@ export default function EditProfilePage() {
 
             {/* AES-NI Support */}
             <div>
-              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">AES-NI SUPPORT</label>
+              <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">AES HARDWARE ACCELERATION SUPPORT</label>
               <div className="flex gap-3">
                 <ToggleButton
                   active={form.hw_accel_aes_ni === true}

@@ -445,7 +445,7 @@ export default function NewProfilePage() {
             {/* AES-NI Support */}
             <div>
               <label className="block font-mono text-xs text-[#5b8cff] tracking-wide mb-2">
-                AES-NI SUPPORT
+                AES HARDWARE ACCELERATION SUPPORT
               </label>
               <div className="flex gap-3">
                 <ToggleButton
